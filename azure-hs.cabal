@@ -41,6 +41,9 @@ library
     , time               >=1.12  && <1.15
     , xml-conduit        >=1.9   && <1.11
 
+-- NOTE: build-tool-depends: hspec-discover:hspec-discover is intentionally omitted.
+-- In the nix dev shell hspec-discover is already on PATH (via the ghc-with-packages
+-- wrapper), and declaring it makes cabal's v2 solver reject the test plan (Cabal-7043).
 test-suite spec
   import:             shared
   type:               exitcode-stdio-1.0
