@@ -55,7 +55,7 @@ renderSigningTrace st =
     , " string-to-sign=" <> quoted (stStringToSign st)
     , " canonicalized-headers=" <> quoted (stCanonicalHeaders st)
     , " canonicalized-resource=" <> quoted (stCanonicalResource st)
-    , " signature=" <> B.byteString (stSignature st)
+    , " signature=" <> B.byteString (escapeNewlines (stSignature st))
     ]
   where
     quoted b = "\"" <> B.byteString (escapeNewlines b) <> "\""

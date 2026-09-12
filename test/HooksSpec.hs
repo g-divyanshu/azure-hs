@@ -25,6 +25,11 @@ spec = do
         `shouldBe` "signing scheme=SharedKeyScheme string-to-sign=\"GET\\n\\n\\nx-ms-date:d\\n/acct/c\" canonicalized-headers=\"x-ms-date:d\\n\" canonicalized-resource=\"/acct/c\" signature=c2lnbmF0dXJl"
     it "never contains a raw newline" $
       LBS.elem 10 (render st) `shouldBe` False
+    it "escapes a raw newline in the signature field too" $ do
+      let st' = st {stSignature = "ab\ncd"}
+      LBS.elem 10 (render st') `shouldBe` False
+      render st'
+        `shouldBe` "signing scheme=SharedKeyScheme string-to-sign=\"GET\\n\\n\\nx-ms-date:d\\n/acct/c\" canonicalized-headers=\"x-ms-date:d\\n\" canonicalized-resource=\"/acct/c\" signature=ab\\ncd"
 
   describe "noHooks" $
     it "passes requests through unchanged" $ do
