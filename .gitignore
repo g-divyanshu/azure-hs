@@ -1,0 +1,6 @@
+dist-newstyle/
+result
+.DS_Store
+__azurite_db_*
+__blobstorage__/
+__queuestorage__/
