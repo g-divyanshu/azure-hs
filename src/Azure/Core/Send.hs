@@ -87,8 +87,8 @@ attempt env a =
                 Right b -> Left (parseServiceError st hdrs b, retryAfterMicros hdrs)
             else
               try (liftIO (fromResponse a st hdrs (responseBody resp))) >>= \case
-                Left e -> pure (Left (TransportError e, Nothing))
-                Right (Left e) -> pure (Left (e, Nothing))
+                Left e -> release key >> pure (Left (TransportError e, Nothing))
+                Right (Left e) -> release key >> pure (Left (e, Nothing))
                 Right (Right v) -> pure (Right v)
 
 -- | Build, hook, date and authorise a request. Runs once per attempt.
