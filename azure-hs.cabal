@@ -21,10 +21,12 @@ library
   hs-source-dirs:   src
   exposed-modules:
     Azure.Core.Credential
+    Azure.Core.Env
     Azure.Core.Error
     Azure.Core.Error.Lens
     Azure.Core.Hooks
     Azure.Core.Logger
+    Azure.Core.Request
     Azure.Core.Retry
     Azure.Core.Signing
   build-depends:
@@ -59,6 +61,7 @@ test-suite spec
     ErrorSpec
     HooksSpec
     LoggerSpec
+    RequestSpec
     RetrySpec
     SigningSpec
   ghc-options:        -threaded -rtsopts -with-rtsopts=-N
