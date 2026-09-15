@@ -58,6 +58,14 @@ concurrency), retry (429 with Retry-After, 500/502/503/504, connection failures)
 hooks and logging are handled by `send`. This example is compiled and run by
 `test/CoreSpec.hs`.
 
+Because `send`/`trySend` run in `ResourceT`, the HTTP connection is tied to
+that scope: a successful call may return a result that holds the response
+body lazily, so the connection is not released back to the pool until the
+enclosing `runResourceT` completes. A loop that makes many calls under one
+scope (e.g. pagination) and wants each connection returned promptly should
+wrap each call in its own `runResourceT`, or fully force the result before
+continuing.
+
 ## Errors
 
 `ServiceError` carries the HTTP status, Azure's error code, the message and

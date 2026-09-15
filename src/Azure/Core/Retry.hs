@@ -78,6 +78,9 @@ withRetry pol onRetry attempt =
       Right _ -> pure R.DontRetry
       Left (err, hint)
         | not (isRetryable err) -> pure R.DontRetry
+        -- retryingDynamic consults 'decide' BEFORE the policy's own stop
+        -- condition, so without this guard the doomed final attempt would
+        -- still fire 'onRetry'. Not redundant with 'R.limitRetries' above.
         | R.rsIterNumber st >= rpMaxRetries pol -> pure R.DontRetry
         | otherwise -> do
             liftIO (onRetry (R.rsIterNumber st + 1) err)

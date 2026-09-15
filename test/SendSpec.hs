@@ -18,6 +18,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Time (addUTCTime, getCurrentTime)
 import Network.HTTP.Client (defaultManagerSettings, newManager, requestHeaders)
@@ -52,6 +53,28 @@ instance AzureRequest Mail where
   toRequest _ (Mail base) = mkRequest "POST" (base <> "/emails:send") [("api-version", Just "2025-09-01")]
   fromResponse _ _ _ _ = pure (Right ())
   authFor _ = BearerAuth communicationScope
+
+-- | A storage-style GET whose 'fromResponse' throws a non-'HttpException'
+-- (e.g. a service's XML/JSON decoder hitting a parse error) instead of
+-- reporting it through the 'Either'. Used to verify that boundary is
+-- guarded, not left to leak a raw exception out of send/trySend.
+newtype Boom = Boom Text
+
+instance AzureRequest Boom where
+  type Rs Boom = ()
+  toRequest _ (Boom base) = mkRequest "GET" (base <> "/devstoreaccount1/c/b") [("comp", Just "metadata")]
+  fromResponse _ _ _ _ = ioError (userError "boom")
+  authFor _ = StorageAuth
+
+-- | A request whose 'toRequest' throws a non-'HttpException'. Used to verify
+-- that boundary is guarded too.
+data BadBuild = BadBuild
+
+instance AzureRequest BadBuild where
+  type Rs BadBuild = ()
+  toRequest _ _ = error "cannot build"
+  fromResponse _ _ _ _ = pure (Right ())
+  authFor _ = StorageAuth
 
 data Harness = Harness
   { hEnv :: Env
@@ -177,6 +200,30 @@ spec = do
         lookup "Authorization" (recHeaders r) `shouldBe` Nothing
       logs <- hLogs h
       filter ("c2VjcmV0" `BS.isInfixOf`) logs `shouldBe` []
+
+  describe "boundary hardening" $ do
+    it "turns a non-HttpException thrown by fromResponse into a SerializeError, and does not retry it" $ do
+      h <- harness (AccountKey devAccount devKey)
+      withStub [(status200, [], "")] $ \base recorded -> do
+        r <- runResourceT (trySend (hEnv h) (Boom base))
+        case r of
+          Left (SerializeError msg) -> msg `shouldSatisfy` ("decoding the response failed" `T.isInfixOf`)
+          other -> expectationFailure ("expected a SerializeError, got " <> show other)
+        length <$> recorded `shouldReturn` 1
+      hRetries h `shouldReturn` []
+
+    it "send throws an AzureError (not a raw exception) when fromResponse throws" $ do
+      h <- harness (AccountKey devAccount devKey)
+      withStub [(status200, [], "")] $ \base _ ->
+        runResourceT (send (hEnv h) (Boom base))
+          `shouldThrow` (\case SerializeError _ -> True; _ -> False)
+
+    it "turns a non-HttpException thrown by toRequest into a SerializeError" $ do
+      h <- harness (AccountKey devAccount devKey)
+      r <- runResourceT (trySend (hEnv h) BadBuild)
+      case r of
+        Left (SerializeError msg) -> msg `shouldSatisfy` ("building the request failed" `T.isInfixOf`)
+        other -> expectationFailure ("expected a SerializeError, got " <> show other)
 
   describe "bearer" $
     it "20 concurrent sends share one token fetch, and the token is never logged" $ do

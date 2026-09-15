@@ -34,8 +34,13 @@ data Hooks = Hooks
   , hookSigned :: SigningTrace -> IO ()
   , hookResponse :: Response () -> IO ()
   , hookError :: AzureError -> IO ()
+  -- ^ Receives the raw, unredacted 'AzureError' (e.g. a @TransportError@ can
+  -- embed a URL with a SAS @sig=@ query param). The library redacts its own
+  -- logs; a consumer that logs this error itself is responsible for
+  -- redacting it.
   , hookRetry :: Int -> AzureError -> IO ()
-  -- ^ Attempt number (1 = first retry) and the error that caused it.
+  -- ^ Attempt number (1 = first retry) and the error that caused it. Same
+  -- redaction caveat as 'hookError': this is the raw, unredacted error.
   }
 
 noHooks :: Hooks
