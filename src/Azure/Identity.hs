@@ -1,12 +1,12 @@
 -- | Entra credentials: the four ambient sources, discovery, and the
 -- never-discovered explicit constructors. Produces 'Credential' values that
 -- the core's send pipeline consumes; the core owns token caching and refresh.
-{-# LANGUAGE OverloadedStrings #-}
 module Azure.Identity
   ( -- * Configuration newtypes
     TenantId (..)
   , ClientId (..)
-  , ClientSecret (..)
+  , ClientSecret
+  , mkClientSecret
     -- * Explicit, never-discovered credentials
   , fromAccountKey
   , fromSasToken
@@ -23,6 +23,10 @@ newtype ClientId = ClientId Text deriving stock (Eq, Show)
 
 newtype ClientSecret = ClientSecret Text
 instance Show ClientSecret where show _ = "ClientSecret <redacted>"
+
+-- | Wrap a client secret value.
+mkClientSecret :: Text -> ClientSecret
+mkClientSecret = ClientSecret
 
 fromAccountKey :: AccountName -> AccountKey -> Credential
 fromAccountKey = AccountKey

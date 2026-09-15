@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 module IdentitySpec (spec) where
 
 import Azure.Core.Credential (Credential (..))
