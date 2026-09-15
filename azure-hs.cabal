@@ -20,6 +20,7 @@ library
   import:           shared
   hs-source-dirs:   src
   exposed-modules:
+    Azure.Core
     Azure.Core.Credential
     Azure.Core.Env
     Azure.Core.Error
@@ -58,6 +59,7 @@ test-suite spec
   hs-source-dirs:     test
   main-is:            Spec.hs
   other-modules:
+    CoreSpec
     CredentialSpec
     ErrorSpec
     HooksSpec
