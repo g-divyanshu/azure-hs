@@ -10,7 +10,9 @@ import qualified Data.Text as T
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types (status200, status401)
 import StubServer (Recorded (..), withStub)
+import System.Directory (getTemporaryDirectory)
 import System.Environment (setEnv, unsetEnv)
+import System.FilePath ((</>))
 import Test.Hspec
 
 spec :: Spec
@@ -56,6 +58,28 @@ spec = describe "Azure.Identity" $ do
             _ -> error "clientSecretCredential did not return an Entra credential"
           tsFetch src mgr (Scope "https://storage.azure.com/.default")
             `shouldThrow` \e -> case e of ServiceError {} -> True; _ -> False
+
+  describe "workloadIdentityCredential" $ do
+    it "sends the file contents as client_assertion and re-reads on each fetch" $ do
+      mgr <- newTlsManager
+      dir <- getTemporaryDirectory
+      let path = dir </> "azhs-fed-token.txt"
+          body = "{\"token_type\":\"Bearer\",\"expires_in\":3599,\"access_token\":\"t\"}"
+      writeFile path "FIRST_ASSERTION"
+      withStub [(status200, [], LC.pack body), (status200, [], LC.pack body)] $ \baseUrl reqs ->
+        withEnvVar "AZURE_AUTHORITY_HOST" (T.unpack baseUrl) $ do
+          src <- case workloadIdentityCredential (TenantId "t1") (ClientId "c1") path of
+            Entra s -> pure s
+            _ -> error "workloadIdentityCredential did not return an Entra credential"
+          _ <- tsFetch src mgr (Scope "https://storage.azure.com/.default")
+          writeFile path "SECOND_ASSERTION"
+          _ <- tsFetch src mgr (Scope "https://storage.azure.com/.default")
+          rs <- reqs
+          let forms = map (BC.unpack . LC.toStrict . recBody) rs
+          forms !! 0 `shouldContain` "client_assertion=FIRST_ASSERTION"
+          forms !! 1 `shouldContain` "client_assertion=SECOND_ASSERTION"
+          head forms `shouldContain`
+            "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer"
   where
     isLeft = either (const True) (const False)
     summarise = either (("Left " <>) . show) (const "Right <credential>")

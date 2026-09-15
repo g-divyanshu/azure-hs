@@ -9,6 +9,7 @@ module Azure.Identity
   , mkClientSecret
     -- * Entra credentials
   , clientSecretCredential
+  , workloadIdentityCredential
     -- * Explicit, never-discovered credentials
   , fromAccountKey
   , fromSasToken
@@ -25,6 +26,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
+import qualified Data.Text.IO as TIO
 import Data.Time (addUTCTime, getCurrentTime)
 import Network.HTTP.Client (HttpException, Manager, Response (..), httpLbs, parseRequest, urlEncodedBody)
 import Network.HTTP.Types (statusIsSuccessful)
@@ -99,6 +101,27 @@ clientSecretCredential tenant cid (ClientSecret secret) =
     fetch mgr scope = do
       host <- resolveAuthorityHost
       postToken mgr host tenant cid scope [("client_secret", encodeUtf8 secret)]
+
+-- | The fixed @client_assertion_type@ form field for the JWT-bearer
+-- client-assertion flow (RFC 7523), shared by every federated-token
+-- credential.
+assertionTypeField :: (ByteString, ByteString)
+assertionTypeField =
+  ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+
+-- | Authenticate with a tenant, client ID and a federated (workload
+-- identity) token projected to @path@ by the platform, e.g. AKS or GitHub
+-- Actions OIDC. The file is re-read on every fetch — the projected token is
+-- rotated out-of-band and must never be cached. The assertion is never
+-- logged: it flows straight from disk into the request body.
+workloadIdentityCredential :: TenantId -> ClientId -> FilePath -> Credential
+workloadIdentityCredential tenant cid path =
+  Entra (TokenSource "WorkloadIdentity" fetch)
+  where
+    fetch mgr scope = do
+      assertion <- encodeUtf8 . T.strip <$> TIO.readFile path
+      host <- resolveAuthorityHost
+      postToken mgr host tenant cid scope [assertionTypeField, ("client_assertion", assertion)]
 
 fromAccountKey :: AccountName -> AccountKey -> Credential
 fromAccountKey = AccountKey
