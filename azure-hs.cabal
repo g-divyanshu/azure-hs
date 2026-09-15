@@ -2,7 +2,7 @@ cabal-version:      3.0
 name:               azure-hs
 version:            0.1.0.0
 synopsis:           Haskell SDK for Azure Blob Storage, ACS Email and Entra ID
-license:            NONE
+license:            MIT
 build-type:         Simple
 tested-with:        GHC == 9.6.7
 

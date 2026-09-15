@@ -1,7 +1,7 @@
 # azure-hs
 
 A Haskell SDK for a working subset of Microsoft Azure: Blob Storage, ACS Email and
-Entra ID. It builds with GHC 9.6. Design: `SOLUTION.md`. Context and traps: `HANDOFF.md`.
+Entra ID. It builds with GHC 9.6. Licensed under the MIT license.
 
 This README covers the core. Service modules (`Azure.Identity`, `Azure.Storage.Blob`,
 `Azure.Communication.Email`) add their own sections as they land.
