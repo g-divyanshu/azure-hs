@@ -24,6 +24,7 @@ library
     Azure.Core.Error.Lens
     Azure.Core.Hooks
     Azure.Core.Logger
+    Azure.Core.Retry
     Azure.Core.Signing
   build-depends:
     , aeson              >=2.2   && <2.3
@@ -56,6 +57,7 @@ test-suite spec
     ErrorSpec
     HooksSpec
     LoggerSpec
+    RetrySpec
     SigningSpec
   ghc-options:        -threaded -rtsopts -with-rtsopts=-N
   build-depends:
