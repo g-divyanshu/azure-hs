@@ -67,7 +67,7 @@ spec = do
       stringToSign "GET" [("Date", "Mon, 01 Jan 2024 00:00:00 GMT"), ("x-ms-date", "d")] Nothing "" "/a/c"
         `shouldBe` "GET\n\n\n\n\n\n\n\n\n\n\n\n/a/c"
 
-  describe "canonicalizedHeaders" $
+  describe "canonicalizedHeaders" $ do
     it "lowercases, sorts, unfolds whitespace outside quotes, keeps empty values, ignores non-x-ms" $
       canonicalizedHeaders
         [ ("X-MS-Version", "2026-06-06")
@@ -78,6 +78,13 @@ spec = do
         , ("x-ms-empty", "")
         ]
         `shouldBe` "x-ms-date:d\nx-ms-empty:\nx-ms-meta-a:v1 v2\nx-ms-meta-q:\"a  b\"\nx-ms-version:2026-06-06\n"
+    it "combines duplicate x-ms headers into one line, comma-joined in request order" $
+      canonicalizedHeaders
+        [ ("x-ms-meta-x", "1")
+        , ("x-ms-date", "d")
+        , ("x-ms-meta-x", "2")
+        ]
+        `shouldBe` "x-ms-date:d\nx-ms-meta-x:1,2\n"
 
   describe "canonicalizedResource" $ do
     it "matches Microsoft's List Blobs example (multi-valued, sorted, comma-joined)" $

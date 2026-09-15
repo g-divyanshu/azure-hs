@@ -28,7 +28,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
 import Data.Char (toLower)
 import Data.Int (Int64)
-import Data.List (sort, sortOn)
+import Data.List (sort)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -118,14 +118,16 @@ bodyLength = \case
 
 canonicalizedHeaders :: RequestHeaders -> ByteString
 canonicalizedHeaders hdrs =
-  mconcat [n <> ":" <> v <> "\n" | (n, v) <- sortOn fst msHeaders]
+  mconcat [n <> ":" <> BS.intercalate "," vs <> "\n" | (n, vs) <- Map.toAscList grouped]
   where
-    msHeaders =
-      [ (name, normaliseValue v)
-      | (k, v) <- hdrs
-      , let name = CI.foldedCase k
-      , "x-ms-" `BS.isPrefixOf` name
-      ]
+    grouped =
+      Map.fromListWith
+        (flip (<>))
+        [ (name, [normaliseValue v])
+        | (k, v) <- hdrs
+        , let name = CI.foldedCase k
+        , "x-ms-" `BS.isPrefixOf` name
+        ]
 
 -- | Trim, and collapse runs of linear whitespace to one space outside quotes.
 normaliseValue :: ByteString -> ByteString
