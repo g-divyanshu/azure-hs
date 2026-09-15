@@ -80,6 +80,18 @@ spec = describe "Azure.Identity" $ do
           forms !! 1 `shouldContain` "client_assertion=SECOND_ASSERTION"
           head forms `shouldContain`
             "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer"
+
+  describe "loadClientCertificatePem" $ do
+    it "loads a PEM containing a certificate and RSA private key" $ do
+      cc <- loadClientCertificatePem "test/fixtures/identity/test-cert.pem"
+      cc `seq` pure ()   -- forces successful parse; internals verified in the JWT test
+
+    it "throws AuthError on a PEM without a private key" $ do
+      dir <- getTemporaryDirectory
+      let path = dir </> "azhs-bad.pem"
+      writeFile path "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n"
+      loadClientCertificatePem path
+        `shouldThrow` \e -> case e of AuthError _ -> True; _ -> False
   where
     isLeft = either (const True) (const False)
     summarise = either (("Left " <>) . show) (const "Right <credential>")

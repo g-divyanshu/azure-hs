@@ -10,6 +10,9 @@ module Azure.Identity
     -- * Entra credentials
   , clientSecretCredential
   , workloadIdentityCredential
+    -- * Certificate credential
+  , ClientCertificate
+  , loadClientCertificatePem
     -- * Explicit, never-discovered credentials
   , fromAccountKey
   , fromSasToken
@@ -20,14 +23,22 @@ import Azure.Core.Credential (AccessToken (..), Credential (..), Scope (..), Tok
 import Azure.Core.Error (AzureError (..), parseServiceError)
 import Azure.Core.Signing (AccountKey, AccountName (..), mkAccountKey)
 import Control.Exception (throwIO, try)
+import Crypto.Hash (SHA1 (..), hashWith)
+import qualified Crypto.PubKey.RSA as RSA
 import qualified Data.Aeson as A
+import Data.ByteArray (convert)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64.URL as B64U
 import Data.Maybe (fromMaybe)
+import Data.PEM (pemContent, pemName, pemParseBS)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text.IO as TIO
 import Data.Time (addUTCTime, getCurrentTime)
+import Data.X509 (PrivKey (..))
+import Data.X509.Memory (readKeyFileFromMemory)
 import Network.HTTP.Client (HttpException, Manager, Response (..), httpLbs, parseRequest, urlEncodedBody)
 import Network.HTTP.Types (statusIsSuccessful)
 import System.Environment (lookupEnv)
@@ -122,6 +133,34 @@ workloadIdentityCredential tenant cid path =
       assertion <- encodeUtf8 . T.strip <$> TIO.readFile path
       host <- resolveAuthorityHost
       postToken mgr host tenant cid scope [assertionTypeField, ("client_assertion", assertion)]
+
+-- | An RSA private key paired with its certificate's @x5t@ thumbprint,
+-- loaded from a PEM file. Opaque: the private key is never exposed via a
+-- selector or 'Show', so it can only leak by deliberate misuse inside this
+-- module. Consumed by the (Task 5) certificate client-assertion JWT.
+data ClientCertificate = ClientCertificate RSA.PrivateKey ByteString
+  -- ClientCertificate <privateKey> <x5t base64url thumbprint>
+
+-- | Load a PEM file containing an X.509 certificate and its unencrypted RSA
+-- private key (in either order, PKCS#1 or PKCS#8), and compute the
+-- certificate's @x5t@ thumbprint (base64url, unpadded, of the SHA-1 digest
+-- of the DER-encoded certificate) once at load time. Throws 'AuthError' if
+-- the file cannot be parsed as PEM, has no @CERTIFICATE@ block, or has no
+-- RSA private key.
+loadClientCertificatePem :: FilePath -> IO ClientCertificate
+loadClientCertificatePem path = do
+  raw <- BS.readFile path
+  pems <- either (badCert . T.pack) pure (pemParseBS raw)
+  certDer <- case [ pemContent p | p <- pems, pemName p == "CERTIFICATE" ] of
+    (der : _) -> pure der
+    []        -> badCert "no CERTIFICATE block in PEM"
+  key <- case [ k | PrivKeyRSA k <- readKeyFileFromMemory raw ] of
+    (k : _) -> pure k
+    []      -> badCert "no RSA private key in PEM"
+  let x5t = B64U.encodeUnpadded (convert (hashWith SHA1 certDer))
+  pure (ClientCertificate key x5t)
+  where
+    badCert msg = throwIO (AuthError ("loadClientCertificatePem: " <> msg))
 
 fromAccountKey :: AccountName -> AccountKey -> Credential
 fromAccountKey = AccountKey
