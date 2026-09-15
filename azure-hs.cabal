@@ -89,6 +89,7 @@ test-suite spec
     , directory
     , filepath
     , http-client
+    , http-client-tls
     , http-types
     , hspec
     , lens
