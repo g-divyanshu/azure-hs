@@ -2,5 +2,8 @@ dist-newstyle/
 result
 .DS_Store
 __azurite_db_*
+HANDOFF.md
+SOLUTION.md
+docs/
 __blobstorage__/
 __queuestorage__/
