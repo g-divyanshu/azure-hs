@@ -22,6 +22,7 @@ module Azure.Storage.Blob
   , BlobProperties (..)
   , GetBlobProperties (..)
   , ListBlobs (..)
+  , GetUserDelegationKey (..)
   , BlobService (..)
   , blobService
     -- * Ergonomic helpers
@@ -35,13 +36,14 @@ module Azure.Storage.Blob
   , blobResourceUrl
   , parseBlobList
   , parseBlobProperties
+  , parseUserDelegationKey
   ) where
 
-import Azure.Core.Credential (Credential (..), storeCredential)
+import Azure.Core.Credential (Credential (..), storageScope, storeCredential)
 import Azure.Core.Env (Env, envCredential)
 import Azure.Core.Error (AzureError (..), errorStatus)
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest, readBody)
-import Azure.Core.SAS (SasProtocol (..), SasSpec (..), newBlobReadSpec, serviceSas)
+import Azure.Core.SAS (SasProtocol (..), SasSpec (..), UserDelegationKey, mkUserDelegationKey, newBlobReadSpec, serviceSas)
 import Azure.Core.Send (send, trySend)
 import Azure.Core.Signing (AccountName (..))
 import Control.Exception (throwIO)
@@ -207,6 +209,29 @@ instance AzureRequest ListBlobs where
     body <- readBody br
     pure (either (Left . SerializeError) Right (parseBlobList body))
 
+data GetUserDelegationKey = GetUserDelegationKey
+  { gudkEndpoint :: BlobEndpoint
+  , gudkStart :: Text
+  , gudkExpiry :: Text
+  }
+
+instance AzureRequest GetUserDelegationKey where
+  type Rs GetUserDelegationKey = UserDelegationKey
+
+  authFor _ = BearerAuth storageScope
+
+  toRequest _ g = do
+    r <- mkRequest "POST" (beBase (gudkEndpoint g) <> "/") [("restype", Just "service"), ("comp", Just "userdelegationkey")]
+    pure r {requestBody = RequestBodyBS (keyInfoBody (gudkStart g) (gudkExpiry g))}
+
+  fromResponse _ _ _ br = do
+    body <- readBody br
+    pure (either (Left . SerializeError) Right (parseUserDelegationKey body))
+
+keyInfoBody :: Text -> Text -> ByteString
+keyInfoBody start expiry =
+  encodeUtf8 ("<?xml version=\"1.0\" encoding=\"utf-8\"?><KeyInfo><Start>" <> start <> "</Start><Expiry>" <> expiry <> "</Expiry></KeyInfo>")
+
 -- | Upload @body@ as a block blob, replacing any existing blob of the same
 -- name.
 putBlob_ :: BlobService -> Container -> BlobName -> ByteString -> IO ()
@@ -286,3 +311,13 @@ parseBlobList body = case X.parseLBS X.def body of
         names = cur $/ element "Blobs" &/ element "Blob" &/ element "Name" &/ content
         marker = T.concat (cur $/ element "NextMarker" &/ content)
      in Right (BlobPage (map BlobName names) (if T.null marker then Nothing else Just marker))
+
+-- | Parse a Get User Delegation Key response. Unqualified element names.
+parseUserDelegationKey :: LBS.ByteString -> Either Text UserDelegationKey
+parseUserDelegationKey body = case X.parseLBS X.def body of
+  Left e -> Left ("UserDelegationKey XML: " <> T.pack (show e))
+  Right doc ->
+    let cur = fromDocument doc
+        el n = T.concat (cur $/ element n &/ content)
+     in mkUserDelegationKey (el "SignedOid") (el "SignedTid") (el "SignedStart")
+          (el "SignedExpiry") (el "SignedService") (el "SignedVersion") (el "Value")
