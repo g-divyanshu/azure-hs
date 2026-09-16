@@ -10,6 +10,7 @@ module Azure.Identity
     -- * Entra credentials
   , clientSecretCredential
   , workloadIdentityCredential
+  , managedIdentityCredential
     -- * Certificate credential
   , ClientCertificate
   , loadClientCertificatePem
@@ -42,13 +43,23 @@ import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import qualified Data.Text.IO as TIO
 import Data.Time (addUTCTime, getCurrentTime)
-import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Time.Clock.POSIX (getPOSIXTime, posixSecondsToUTCTime)
 import Data.X509 (PrivKey (..))
 import Data.X509.Memory (readKeyFileFromMemory)
-import Network.HTTP.Client (HttpException, Manager, Response (..), httpLbs, parseRequest, urlEncodedBody)
+import Network.HTTP.Client
+  ( HttpException
+  , Manager
+  , Response (..)
+  , httpLbs
+  , parseRequest
+  , requestHeaders
+  , setQueryString
+  , urlEncodedBody
+  )
 import Network.HTTP.Types (statusIsSuccessful)
 import Numeric (showHex)
 import System.Environment (lookupEnv)
+import Text.Read (readMaybe)
 
 newtype TenantId = TenantId Text deriving stock (Eq, Show)
 newtype ClientId = ClientId Text deriving stock (Eq, Show)
@@ -140,6 +151,51 @@ workloadIdentityCredential tenant cid path =
       assertion <- encodeUtf8 . T.strip <$> TIO.readFile path
       host <- resolveAuthorityHost
       postToken mgr host tenant cid scope [assertionTypeField, ("client_assertion", assertion)]
+
+-- | The IMDS token response: an access token plus an absolute expiry
+-- (epoch seconds, sent as a string — unlike the OAuth2 endpoints'
+-- relative @expires_in@).
+data ImdsToken = ImdsToken Text Text
+
+instance A.FromJSON ImdsToken where
+  parseJSON = A.withObject "imds" $ \o ->
+    ImdsToken <$> o A..: "access_token" <*> o A..: "expires_on"
+
+-- | Authenticate via the IMDS metadata endpoint (Azure VM, App Service,
+-- AKS pod identity, etc.) — the one source that bypasses the Entra token
+-- endpoint entirely. Pass a 'ClientId' to select a user-assigned identity;
+-- 'Nothing' uses the system-assigned one. The metadata host defaults to the
+-- standard IMDS link-local address and is overridable via
+-- @AZURE_POD_IDENTITY_AUTHORITY_HOST@ (read at fetch time, the stub-server
+-- test seam). The bearer token is never logged.
+managedIdentityCredential :: Maybe ClientId -> Credential
+managedIdentityCredential mcid = Entra (TokenSource "ManagedIdentity" fetch)
+  where
+    fetch mgr (Scope scope) = do
+      host <- T.pack . fromMaybe "http://169.254.169.254"
+                <$> lookupEnv "AZURE_POD_IDENTITY_AUTHORITY_HOST"
+      let resource = fromMaybe scope (T.stripSuffix "/.default" scope)
+          qs =
+            [ ("api-version", Just "2018-02-01")
+            , ("resource", Just (encodeUtf8 resource))
+            ]
+              <> [("client_id", Just (encodeUtf8 c)) | Just (ClientId c) <- [mcid]]
+      req0 <- parseRequest (T.unpack host <> "/metadata/identity/oauth2/token")
+      let req =
+            setQueryString qs
+              req0 {requestHeaders = ("Metadata", "true") : requestHeaders req0}
+      eResp <- try (httpLbs req mgr)
+      resp <- either (\e -> throwIO (TransportError (e :: HttpException))) pure eResp
+      let st = responseStatus resp
+          body = responseBody resp
+      if statusIsSuccessful st
+        then case A.eitherDecode body of
+          Right (ImdsToken acc expOn) -> case readMaybe (T.unpack expOn) :: Maybe Integer of
+            Just secs ->
+              pure (AccessToken (encodeUtf8 acc) (posixSecondsToUTCTime (fromIntegral secs)))
+            Nothing -> throwIO (SerializeError ("IMDS expires_on not an integer: " <> expOn))
+          Left err -> throwIO (SerializeError ("IMDS response: " <> T.pack err))
+        else throwIO (parseServiceError st (responseHeaders resp) body)
 
 -- | An RSA private key paired with its certificate's @x5t@ thumbprint,
 -- loaded from a PEM file. Opaque: the private key is never exposed via a

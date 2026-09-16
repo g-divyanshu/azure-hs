@@ -140,6 +140,38 @@ spec = describe "Azure.Identity" $ do
           -- signature verifies against the fixture public key
           let signingInput = h <> "." <> p
           PKCS15.verify (Just SHA256) pub signingInput (B64U.decodeLenient s) `shouldBe` True
+
+  describe "managedIdentityCredential" $ do
+    it "GETs IMDS with Metadata:true, strips /.default to a resource, parses expires_on" $ do
+      mgr <- newTlsManager
+      -- expires_on is absolute epoch seconds as a string:
+      let body = "{\"token_type\":\"Bearer\",\"access_token\":\"imds-tok\",\
+                 \\"expires_on\":\"1893456000\",\"resource\":\"https://storage.azure.com\"}"
+      withStub [(status200, [], LC.pack body)] $ \baseUrl reqs ->
+        withEnvVar "AZURE_POD_IDENTITY_AUTHORITY_HOST" (T.unpack baseUrl) $ do
+          src <- case managedIdentityCredential Nothing of
+            Entra s -> pure s
+            _ -> error "managedIdentityCredential did not return an Entra credential"
+          tok <- tsFetch src mgr (Scope "https://storage.azure.com/.default")
+          atToken tok `shouldBe` "imds-tok"
+          [r] <- reqs
+          recMethod r `shouldBe` "GET"
+          recPath r `shouldBe` "/metadata/identity/oauth2/token"
+          lookup "Metadata" (recHeaders r) `shouldBe` Just "true"
+          BC.unpack (recQuery r) `shouldContain` "resource=https%3A%2F%2Fstorage.azure.com"
+          BC.unpack (recQuery r) `shouldContain` "api-version=2018-02-01"
+
+    it "adds client_id for a user-assigned identity" $ do
+      mgr <- newTlsManager
+      let body = "{\"access_token\":\"t\",\"expires_on\":\"1893456000\"}"
+      withStub [(status200, [], LC.pack body)] $ \baseUrl reqs ->
+        withEnvVar "AZURE_POD_IDENTITY_AUTHORITY_HOST" (T.unpack baseUrl) $ do
+          src <- case managedIdentityCredential (Just (ClientId "uami-1")) of
+            Entra s -> pure s
+            _ -> error "managedIdentityCredential did not return an Entra credential"
+          _ <- tsFetch src mgr (Scope "https://storage.azure.com/.default")
+          [r] <- reqs
+          BC.unpack (recQuery r) `shouldContain` "client_id=uami-1"
   where
     isLeft = either (const True) (const False)
     summarise = either (("Left " <>) . show) (const "Right <credential>")
