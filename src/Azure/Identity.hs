@@ -13,6 +13,7 @@ module Azure.Identity
     -- * Certificate credential
   , ClientCertificate
   , loadClientCertificatePem
+  , clientCertificateCredential
     -- * Explicit, never-discovered credentials
   , fromAccountKey
   , fromSasToken
@@ -24,23 +25,29 @@ import Azure.Core.Error (AzureError (..), parseServiceError)
 import Azure.Core.Signing (AccountKey, AccountName (..), mkAccountKey)
 import Control.Exception (throwIO, try)
 import Crypto.Hash (SHA1 (..), hashWith)
+import Crypto.Hash.Algorithms (SHA256 (..))
 import qualified Crypto.PubKey.RSA as RSA
+import qualified Crypto.PubKey.RSA.PKCS15 as PKCS15
+import Crypto.Random (getRandomBytes)
 import qualified Data.Aeson as A
 import Data.ByteArray (convert)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64.URL as B64U
+import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe)
 import Data.PEM (pemContent, pemName, pemParseBS)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import qualified Data.Text.IO as TIO
 import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.X509 (PrivKey (..))
 import Data.X509.Memory (readKeyFileFromMemory)
 import Network.HTTP.Client (HttpException, Manager, Response (..), httpLbs, parseRequest, urlEncodedBody)
 import Network.HTTP.Types (statusIsSuccessful)
+import Numeric (showHex)
 import System.Environment (lookupEnv)
 
 newtype TenantId = TenantId Text deriving stock (Eq, Show)
@@ -161,6 +168,56 @@ loadClientCertificatePem path = do
   pure (ClientCertificate key x5t)
   where
     badCert msg = throwIO (AuthError ("loadClientCertificatePem: " <> msg))
+
+-- | A random RFC-4122-ish jti. Uniqueness is all AAD needs; exact version
+-- bits are not validated.
+newJti :: IO Text
+newJti = do
+  bs <- getRandomBytes 16 :: IO ByteString
+  pure (T.pack (concatMap (\w -> pad (showHex w "")) (BS.unpack bs)))
+  where pad [c] = ['0', c]; pad cs = cs
+
+-- | Build and RS256-sign an RFC 7523 client-assertion JWT for @aud@ (the
+-- token endpoint URL), identifying the app as @cid@ via the certificate's
+-- @x5t@ thumbprint. The private key and the finished assertion are never
+-- logged: both flow straight into the signature/request, never through
+-- 'show' or a trace.
+buildClientAssertion :: ClientCertificate -> ClientId -> Text -> IO ByteString
+buildClientAssertion (ClientCertificate key x5t) (ClientId cid) aud = do
+  jti <- newJti
+  now <- floor <$> getPOSIXTime :: IO Int
+  let header = A.object
+        [ "alg" A..= ("RS256" :: Text)
+        , "typ" A..= ("JWT" :: Text)
+        , "x5t" A..= decodeUtf8 x5t
+        ]
+      claims = A.object
+        [ "aud" A..= aud
+        , "iss" A..= cid
+        , "sub" A..= cid
+        , "jti" A..= jti
+        , "nbf" A..= now
+        , "exp" A..= (now + 600)
+        ]
+      seg = B64U.encodeUnpadded . LBS.toStrict . A.encode
+      signingInput = seg header <> "." <> seg claims
+  sig <- case PKCS15.sign Nothing (Just SHA256) key signingInput of
+    Right s -> pure s
+    Left err -> throwIO (AuthError ("client assertion signing: " <> T.pack (show err)))
+  pure (signingInput <> "." <> B64U.encodeUnpadded sig)
+
+-- | Authenticate with a tenant, client ID and an RSA client certificate (the
+-- RFC 7523 JWT-bearer client-assertion flow). A fresh assertion, signed
+-- against the current time, is built on every fetch; the private key never
+-- leaves this module and the assertion is never logged.
+clientCertificateCredential :: TenantId -> ClientId -> ClientCertificate -> Credential
+clientCertificateCredential tenant cid cc =
+  Entra (TokenSource "ClientCertificate" fetch)
+  where
+    fetch mgr scope = do
+      host <- resolveAuthorityHost
+      assertion <- buildClientAssertion cc cid (T.pack (tokenEndpoint host tenant))
+      postToken mgr host tenant cid scope [assertionTypeField, ("client_assertion", assertion)]
 
 fromAccountKey :: AccountName -> AccountKey -> Credential
 fromAccountKey = AccountKey
