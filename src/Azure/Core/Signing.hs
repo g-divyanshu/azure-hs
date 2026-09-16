@@ -8,6 +8,7 @@ module Azure.Core.Signing
   ( AccountName (..)
   , AccountKey
   , mkAccountKey
+  , hmacSha256Base64
   , signSharedKey
   , signWithAccountKey
   , stringToSign
@@ -55,10 +56,14 @@ mkAccountKey t = case B64.decode (encodeUtf8 (T.strip t)) of
   Left e -> Left ("account key is not valid base64: " <> T.pack e)
   Right k -> Right (MkAccountKey k)
 
+-- | Base64 HMAC-SHA256 of a message under raw key bytes.
+hmacSha256Base64 :: ByteString -> ByteString -> ByteString
+hmacSha256Base64 k msg =
+  B64.encode (BA.convert (HMAC.hmac k msg :: HMAC.HMAC Hash.SHA256))
+
 -- | Base64 HMAC-SHA256 of the input under the account key.
 signWithAccountKey :: AccountKey -> ByteString -> ByteString
-signWithAccountKey (MkAccountKey k) msg =
-  B64.encode (BA.convert (HMAC.hmac k msg :: HMAC.HMAC Hash.SHA256))
+signWithAccountKey (MkAccountKey k) = hmacSha256Base64 k
 
 -- | Sign a fully-built request. The request must already carry @x-ms-date@
 -- and @x-ms-version@; 'Azure.Core.Send' adds them.
