@@ -38,6 +38,7 @@ import Azure.Core.SAS (UserDelegationKey (..))
 import Azurite (azuriteAccount, azuriteKey, withAzurite)
 import Control.Monad (forM_)
 import Control.Monad.Trans.Resource (runResourceT)
+import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy.Char8 as LC
 import Data.Proxy (Proxy (..))
@@ -145,12 +146,19 @@ spec = describe "Azure.Storage.Blob" $ do
   describe "parseUserDelegationKey" $
     it "reads all six signed fields and the Value" $ do
       let xml = LC.pack udkXml
+          expectedKeyBytes =
+            either (error . show) id
+              (B64.decode "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==")
       case parseUserDelegationKey xml of
         Left e -> expectationFailure (T.unpack e)
         Right k -> do
           udkObjectId k `shouldBe` "11111111-1111-1111-1111-111111111111"
+          udkTenantId k `shouldBe` "22222222-2222-2222-2222-222222222222"
+          udkStart k `shouldBe` "2024-01-01T00:00:00Z"
+          udkExpiry k `shouldBe` "2024-01-08T00:00:00Z"
           udkService k `shouldBe` "b"
           udkVersion k `shouldBe` "2020-12-06"
+          udkKeyBytes k `shouldBe` expectedKeyBytes
   describe "GetUserDelegationKey toRequest" $
     it "POSTs to /?restype=service&comp=userdelegationkey with a KeyInfo body and bearer auth" $ do
       env <- dummyEnv
