@@ -23,6 +23,18 @@ acct = AccountName "myaccount"
 expiry :: UTCTime
 expiry = UTCTime (fromGregorian 2025 1 1) 0
 
+udk :: UserDelegationKey
+udk =
+  either (error . T.unpack) id $
+    mkUserDelegationKey
+      "00000000-0000-0000-0000-000000000001"   -- skoid
+      "00000000-0000-0000-0000-000000000002"   -- sktid
+      "2024-12-31T00:00:00Z"                    -- skt
+      "2025-01-07T00:00:00Z"                    -- ske
+      "b"                                       -- sks
+      "2020-12-06"                              -- skv
+      "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+
 spec :: Spec
 spec = do
   describe "serviceSasStringToSign: read-only blob SAS at sv=2020-12-06" $ do
@@ -102,3 +114,13 @@ spec = do
       either (const True) (const False)
         (mkUserDelegationKey "oid" "tid" "s" "e" "b" "2020-12-06" "not base64!!")
         `shouldBe` True
+
+  describe "userDelegationSasStringToSign: read-only blob SAS at sv=2020-12-06" $ do
+    let s = newBlobReadSpec "mycontainer" "myblob.txt" expiry
+    it "lays out the 24 documented fields in order, byte-for-byte" $
+      userDelegationSasStringToSign acct udk s
+        `shouldBe` "r\n\n2025-01-01T00:00:00Z\n/blob/myaccount/mycontainer/myblob.txt\n00000000-0000-0000-0000-000000000001\n00000000-0000-0000-0000-000000000002\n2024-12-31T00:00:00Z\n2025-01-07T00:00:00Z\nb\n2020-12-06\n\n\n\n\nhttps\n2020-12-06\nb\n\n\n\n\n\n\n"
+    it "places the key object id in field 5 and the key version in field 10" $ do
+      let f = C.split '\n' (userDelegationSasStringToSign acct udk s)
+      (f !! 4) `shouldBe` "00000000-0000-0000-0000-000000000001"
+      (f !! 9) `shouldBe` "2020-12-06"

@@ -24,6 +24,7 @@ module Azure.Core.SAS
     -- * User Delegation SAS
   , UserDelegationKey (..)
   , mkUserDelegationKey
+  , userDelegationSasStringToSign
   ) where
 
 import Azure.Core.Signing (AccountKey, AccountName (..), signWithAccountKey)
@@ -185,3 +186,37 @@ mkUserDelegationKey skoid sktid skt ske sks skv value =
   case B64.decode (encodeUtf8 (T.strip value)) of
     Left e -> Left ("user delegation key Value is not valid base64: " <> T.pack e)
     Right bs -> Right (UserDelegationKey skoid sktid skt ske sks skv bs)
+
+-- | The user-delegation-SAS string-to-sign for 'sasSignedVersion' (2020-12-06):
+-- 24 positional, newline-separated fields for a blob resource. Differs from the
+-- service-SAS layout by the six user-delegation key fields (skoid..skv) plus the
+-- empty saoid/suoid/scid fields after the canonical resource.
+userDelegationSasStringToSign :: AccountName -> UserDelegationKey -> SasSpec -> ByteString
+userDelegationSasStringToSign acct key spec = encodeUtf8 (T.intercalate "\n" fields)
+  where
+    fields =
+      [ renderPermissions (sasPermissions spec) -- signedPermissions
+      , maybe "" sasTime (sasStart spec) -- signedStart
+      , sasTime (sasExpiry spec) -- signedExpiry
+      , canonicalizedSasResource acct spec -- canonicalizedResource
+      , udkObjectId key -- signedKeyObjectId (skoid)
+      , udkTenantId key -- signedKeyTenantId (sktid)
+      , udkStart key -- signedKeyStart (skt)
+      , udkExpiry key -- signedKeyExpiry (ske)
+      , udkService key -- signedKeyService (sks)
+      , udkVersion key -- signedKeyVersion (skv)
+      , "" -- signedAuthorizedUserObjectId (saoid)
+      , "" -- signedUnauthorizedUserObjectId (suoid)
+      , "" -- signedCorrelationId (scid)
+      , fromMaybe "" (sasIP spec) -- signedIP
+      , sasProtocolValue (sasProtocol spec) -- signedProtocol
+      , decodeUtf8 sasSignedVersion -- signedVersion (sv)
+      , sasResourceCode (sasResource spec) -- signedResource (sr)
+      , "" -- signedSnapshotTime
+      , fromMaybe "" (sasEncryptionScope spec) -- signedEncryptionScope (ses)
+      , "" -- rscc
+      , "" -- rscd
+      , "" -- rsce
+      , "" -- rscl
+      , "" -- rsct
+      ]
