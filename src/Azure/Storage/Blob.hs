@@ -30,15 +30,18 @@ module Azure.Storage.Blob
   , blobExists
   , listBlobNames
   , listBlobNamesPaged
+  , presignedUrl
     -- * Internal (exposed for tests)
   , blobResourceUrl
   , parseBlobList
   , parseBlobProperties
   ) where
 
-import Azure.Core.Env (Env)
+import Azure.Core.Credential (Credential (..), storeCredential)
+import Azure.Core.Env (Env, envCredential)
 import Azure.Core.Error (AzureError (..), errorStatus)
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest, readBody)
+import Azure.Core.SAS (SasProtocol (..), SasSpec (..), newBlobReadSpec, serviceSas)
 import Azure.Core.Send (send, trySend)
 import Azure.Core.Signing (AccountName (..))
 import Control.Exception (throwIO)
@@ -51,6 +54,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
 import Network.HTTP.Client (Request (..), RequestBody (..))
 import Network.HTTP.Types (ResponseHeaders, statusCode)
 import Network.HTTP.Types.Header (RequestHeaders)
@@ -243,6 +247,25 @@ listBlobNamesPaged bs c pfx maxN = go Nothing []
       case bpNextMarker page of
         Just m | not (T.null m) -> go (Just m) acc'
         _ -> pure acc'
+
+-- | A time-limited, anonymously-readable URL for a blob, valid for @ttl@ from
+-- now. This is a service SAS (signed with the account key), so the service
+-- binds an account-key credential; on an Entra credential it fails with
+-- 'AuthError' (a user-delegation SAS is the Entra path). The @spr@ protocol
+-- follows the endpoint scheme: an @https@ endpoint yields an HTTPS-only URL,
+-- and the @http@ emulator yields one usable over either.
+presignedUrl :: BlobService -> Container -> BlobName -> NominalDiffTime -> IO Text
+presignedUrl bs c@(Container cont) n@(BlobName blob) ttl =
+  case storeCredential (envCredential (bsEnv bs)) of
+    AccountKey name key -> do
+      now <- getCurrentTime
+      let BlobEndpoint base = bsEndpoint bs
+          proto = if "https://" `T.isPrefixOf` base then HttpsOnly else HttpsOrHttp
+          spec = (newBlobReadSpec cont blob (addUTCTime ttl now)) {sasProtocol = proto}
+      pure (blobResourceUrl (bsEndpoint bs) c (Just n) <> "?" <> serviceSas name key spec)
+    _ ->
+      throwIO
+        (AuthError "presignedUrl needs an account-key credential; a user-delegation SAS is the Entra path")
 
 -- | Base URL + percent-encoded path. Blob-name '/' is preserved as a segment
 -- separator; every other reserved character is encoded. No query string.
