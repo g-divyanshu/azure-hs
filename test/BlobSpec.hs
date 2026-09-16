@@ -3,7 +3,7 @@
 
 module BlobSpec (spec) where
 
-import Azure.Core.Credential (storageScope)
+import Azure.Core.Credential (AccessToken (..), Credential (..), TokenSource (..), storageScope)
 import Azure.Core.Env (newEnv)
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest)
 import Azure.Core.Send (send)
@@ -43,9 +43,11 @@ import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy.Char8 as LC
 import Data.Proxy (Proxy (..))
 import qualified Data.Text as T
+import Data.Time (addUTCTime, getCurrentTime)
 import Network.HTTP.Client (RequestBody (..), httpLbs, method, parseRequest, path, queryString, requestHeaders, responseBody, responseStatus)
 import Network.HTTP.Client.TLS (newTlsManager)
-import Network.HTTP.Types (statusCode)
+import Network.HTTP.Types (status200, statusCode)
+import StubServer (Recorded (..), withStub)
 import Test.Hspec
 
 -- | Test-only: @PUT {container}?restype=container@. Container creation is
@@ -169,6 +171,20 @@ spec = describe "Azure.Storage.Blob" $ do
       q `shouldContain` "restype=service"
       q `shouldContain` "comp=userdelegationkey"
       authFor (Proxy :: Proxy GetUserDelegationKey) `shouldBe` BearerAuth storageScope
+  describe "GetUserDelegationKey (stub server)" $
+    it "sends a bearer POST and parses the returned key" $
+      withStub [(status200, [], LC.pack udkXml)] $ \base recorded -> do
+        mgr <- newTlsManager
+        now <- getCurrentTime
+        let src = TokenSource "fake" $ \_ _ -> pure (AccessToken "fake-token" (addUTCTime 3600 now))
+        env <- newEnv mgr (pure (Entra src))
+        let ep' = emulatorEndpoint base (AccountName "devstoreaccount1")
+        k <- runResourceT (send env (GetUserDelegationKey ep' "2024-01-01T00:00:00Z" "2024-01-08T00:00:00Z"))
+        udkService k `shouldBe` "b"
+        [rec] <- recorded
+        recMethod rec `shouldBe` "POST"
+        lookup "Authorization" (recHeaders rec) `shouldBe` Just "Bearer fake-token"
+        recBody rec `shouldSatisfy` (\b -> BC.pack "KeyInfo" `BC.isInfixOf` LC.toStrict b)
   describe "withAzurite" $
     it "starts an Azurite blob endpoint that answers HTTP" $
       withAzurite $ \base -> do
