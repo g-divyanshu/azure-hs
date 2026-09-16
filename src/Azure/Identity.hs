@@ -15,6 +15,8 @@ module Azure.Identity
   , ClientCertificate
   , loadClientCertificatePem
   , clientCertificateCredential
+    -- * Ambient discovery
+  , discover
     -- * Explicit, never-discovered credentials
   , fromAccountKey
   , fromSasToken
@@ -275,6 +277,54 @@ clientCertificateCredential tenant cid cc =
       host <- resolveAuthorityHost
       assertion <- buildClientAssertion cc cid (T.pack (tokenEndpoint host tenant))
       postToken mgr host tenant cid scope [assertionTypeField, ("client_assertion", assertion)]
+
+-- | Walk the ambient-credential resolution chain (the
+-- @DefaultAzureCredential@ analogue), in order:
+--
+-- 1. @AZURE_CLIENT_SECRET@ set → 'clientSecretCredential'
+-- 2. else @AZURE_CLIENT_CERTIFICATE_PATH@ set → load the PEM and build
+--    'clientCertificateCredential'
+-- 3. else @AZURE_FEDERATED_TOKEN_FILE@ set → 'workloadIdentityCredential'
+-- 4. else 'managedIdentityCredential', using @AZURE_CLIENT_ID@ if present
+--
+-- @mgr@ is not touched here — discovery only reads env vars (and, for the
+-- certificate path, the PEM file off disk); there is no IMDS probe. Managed
+-- identity is the lazy fallback whose first token fetch surfaces any IMDS
+-- failure. Fails hard rather than falling through: if a trigger var is set
+-- but its companion @AZURE_TENANT_ID@ and\/or @AZURE_CLIENT_ID@ is missing,
+-- 'discover' throws 'AuthError' naming the problem instead of trying the
+-- next source.
+discover :: Manager -> IO Credential
+discover _mgr = do
+  secret <- lookupEnv "AZURE_CLIENT_SECRET"
+  certPath <- lookupEnv "AZURE_CLIENT_CERTIFICATE_PATH"
+  fedFile <- lookupEnv "AZURE_FEDERATED_TOKEN_FILE"
+  case (secret, certPath, fedFile) of
+    (Just s, _, _) -> do
+      (t, c) <- requireTenantClient "AZURE_CLIENT_SECRET"
+      pure (clientSecretCredential t c (ClientSecret (T.pack s)))
+    (_, Just p, _) -> do
+      (t, c) <- requireTenantClient "AZURE_CLIENT_CERTIFICATE_PATH"
+      cc <- loadClientCertificatePem p
+      pure (clientCertificateCredential t c cc)
+    (_, _, Just f) -> do
+      (t, c) <- requireTenantClient "AZURE_FEDERATED_TOKEN_FILE"
+      pure (workloadIdentityCredential t c f)
+    (Nothing, Nothing, Nothing) -> do
+      mcid <- fmap (ClientId . T.pack) <$> lookupEnv "AZURE_CLIENT_ID"
+      pure (managedIdentityCredential mcid)
+
+-- | Read @AZURE_TENANT_ID@ and @AZURE_CLIENT_ID@, or throw an 'AuthError'
+-- naming @trigger@ (the env var that selected the calling branch of
+-- 'discover') when either is missing.
+requireTenantClient :: String -> IO (TenantId, ClientId)
+requireTenantClient trigger = do
+  mt <- lookupEnv "AZURE_TENANT_ID"
+  mc <- lookupEnv "AZURE_CLIENT_ID"
+  case (mt, mc) of
+    (Just t, Just c) -> pure (TenantId (T.pack t), ClientId (T.pack c))
+    _ -> throwIO (AuthError (T.pack trigger
+           <> " is set but AZURE_TENANT_ID and/or AZURE_CLIENT_ID are missing"))
 
 fromAccountKey :: AccountName -> AccountKey -> Credential
 fromAccountKey = AccountKey

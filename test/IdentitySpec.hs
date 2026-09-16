@@ -172,12 +172,52 @@ spec = describe "Azure.Identity" $ do
           _ <- tsFetch src mgr (Scope "https://storage.azure.com/.default")
           [r] <- reqs
           BC.unpack (recQuery r) `shouldContain` "client_id=uami-1"
+
+  describe "discover" $ before_ clearDiscoverEnv $ do
+    let sourceName cred = case cred of Entra s -> tsName s; _ -> "<non-entra>"
+
+    it "selects ClientSecret when the secret and its companions are set" $ do
+      mgr <- newTlsManager
+      withEnvVars
+        [ ("AZURE_TENANT_ID", "t1"), ("AZURE_CLIENT_ID", "c1"), ("AZURE_CLIENT_SECRET", "s") ] $ do
+        cred <- discover mgr
+        sourceName cred `shouldBe` "ClientSecret"
+
+    it "selects WorkloadIdentity when only the federated token file is set" $ do
+      mgr <- newTlsManager
+      withEnvVars
+        [ ("AZURE_TENANT_ID", "t1"), ("AZURE_CLIENT_ID", "c1")
+        , ("AZURE_FEDERATED_TOKEN_FILE", "/var/run/secrets/azure/token") ] $ do
+        cred <- discover mgr
+        sourceName cred `shouldBe` "WorkloadIdentity"
+
+    it "falls back to ManagedIdentity when nothing is configured" $ do
+      mgr <- newTlsManager
+      cred <- discover mgr
+      sourceName cred `shouldBe` "ManagedIdentity"
+
+    it "fails hard when a trigger is set but a companion is missing" $ do
+      mgr <- newTlsManager
+      withEnvVars [ ("AZURE_CLIENT_SECRET", "s") ] $
+        discover mgr `shouldThrow` \e -> case e of AuthError _ -> True; _ -> False
   where
     isLeft = either (const True) (const False)
     summarise = either (("Left " <>) . show) (const "Right <credential>")
 
     withEnvVar :: String -> String -> IO a -> IO a
     withEnvVar k v = bracket_ (setEnv k v) (unsetEnv k)
+
+    withEnvVars :: [(String, String)] -> IO a -> IO a
+    withEnvVars kvs = bracket_ (mapM_ (uncurry setEnv) kvs) (mapM_ (unsetEnv . fst) kvs)
+
+    -- | The five env vars 'discover' inspects. Cleared before every
+    -- "discover" case so a prior case (or stray host-env pollution) can
+    -- never leak into the next one; 'withEnvVars' then sets only what each
+    -- case needs and unsets it afterwards, exception-safely.
+    clearDiscoverEnv :: IO ()
+    clearDiscoverEnv = mapM_ unsetEnv
+      [ "AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PATH"
+      , "AZURE_FEDERATED_TOKEN_FILE", "AZURE_TENANT_ID", "AZURE_CLIENT_ID" ]
 
     takeField :: String -> String -> String
     takeField key form =
