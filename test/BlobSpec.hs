@@ -27,6 +27,7 @@ import Azure.Storage.Blob
   , newPutBlob
   , parseBlobList
   , parseBlobProperties
+  , presignedUrl
   , productionEndpoint
   , putBlob_
   )
@@ -36,8 +37,9 @@ import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy.Char8 as LC
 import qualified Data.Text as T
-import Network.HTTP.Client (RequestBody (..), httpLbs, method, parseRequest, path, queryString, requestHeaders, responseStatus)
+import Network.HTTP.Client (RequestBody (..), httpLbs, method, parseRequest, path, queryString, requestHeaders, responseBody, responseStatus)
 import Network.HTTP.Client.TLS (newTlsManager)
+import Network.HTTP.Types (statusCode)
 import Test.Hspec
 
 -- | Test-only: @PUT {container}?restype=container@. Container creation is
@@ -184,6 +186,24 @@ spec = describe "Azure.Storage.Blob" $ do
         runResourceT (send (bsEnv bs) (CreateContainer (bsEndpoint bs) c))
         putBlob_ bs c (BlobName "a b/c d") "z"
         getBlob_ bs c (BlobName "a b/c d") `shouldReturn` "z"
+
+      it "a service-SAS URL grants the anonymous read that a plain URL is denied" $ \bs -> do
+        let c = Container "rt7"
+            n = BlobName "secret.txt"
+        runResourceT (send (bsEnv bs) (CreateContainer (bsEndpoint bs) c))
+        putBlob_ bs c n "sas-authorized-bytes"
+        mgr <- newTlsManager
+        -- Negative control: without the SAS, an anonymous GET is refused.
+        plain <- parseRequest (T.unpack (blobResourceUrl (bsEndpoint bs) c (Just n)))
+        denied <- httpLbs plain mgr
+        statusCode (responseStatus denied) `shouldNotBe` 200
+        -- With the SAS in the query, the same anonymous GET is authorized by
+        -- the signature alone (no credential, no Authorization header).
+        url <- presignedUrl bs c n 300
+        signed <- parseRequest (T.unpack url)
+        ok <- httpLbs signed mgr
+        statusCode (responseStatus ok) `shouldBe` 200
+        responseBody ok `shouldBe` "sas-authorized-bytes"
 
 listXmlWithMarker :: String
 listXmlWithMarker =
