@@ -201,7 +201,8 @@ buildClientAssertion (ClientCertificate key x5t) (ClientId cid) aud = do
         ]
       seg = B64U.encodeUnpadded . LBS.toStrict . A.encode
       signingInput = seg header <> "." <> seg claims
-  sig <- case PKCS15.sign Nothing (Just SHA256) key signingInput of
+  signed <- PKCS15.signSafer (Just SHA256) key signingInput
+  sig <- case signed of
     Right s -> pure s
     Left err -> throwIO (AuthError ("client assertion signing: " <> T.pack (show err)))
   pure (signingInput <> "." <> B64U.encodeUnpadded sig)
