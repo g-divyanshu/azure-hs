@@ -2,17 +2,24 @@
 
 module BlobSpec (spec) where
 
-import Azure.Core.Signing (AccountName (..))
+import Azure.Core.Env (newEnv)
+import Azure.Core.Request (AzureRequest (toRequest))
+import Azure.Core.Signing (AccountName (..), mkAccountKey)
+import Azure.Identity (fromAccountKey)
 import Azure.Storage.Blob
   ( BlobName (..)
   , BlobPage (..)
   , Container (..)
+  , GetBlob (..)
   , blobResourceUrl
   , emulatorEndpoint
+  , newPutBlob
   , parseBlobList
   , productionEndpoint
   )
 import qualified Data.ByteString.Lazy.Char8 as LC
+import Network.HTTP.Client (RequestBody (..), method, path, requestHeaders)
+import Network.HTTP.Client.TLS (newTlsManager)
 import Test.Hspec
 
 spec :: Spec
@@ -38,6 +45,23 @@ spec = describe "Azure.Storage.Blob" $ do
     it "returns an empty page for a container with no blobs" $
       parseBlobList (LC.pack listXmlEmpty)
         `shouldBe` Right (BlobPage [] Nothing)
+  describe "PutBlob/GetBlob toRequest" $ do
+    let ep = emulatorEndpoint "http://127.0.0.1:10000" (AccountName "devstoreaccount1")
+        dummyEnv = do
+          mgr <- newTlsManager
+          key <- either (fail . show) pure (mkAccountKey "Zm9vYmFy")
+          newEnv mgr (pure (fromAccountKey (AccountName "devstoreaccount1") key))
+    it "PutBlob is a PUT with x-ms-blob-type BlockBlob and the encoded path" $ do
+      env <- dummyEnv
+      r <- toRequest env (newPutBlob ep (Container "c") (BlobName "b") (RequestBodyBS "hi"))
+      method r `shouldBe` "PUT"
+      path r `shouldBe` "/devstoreaccount1/c/b"
+      lookup "x-ms-blob-type" (requestHeaders r) `shouldBe` Just "BlockBlob"
+    it "GetBlob is a GET at the blob path" $ do
+      env <- dummyEnv
+      r <- toRequest env (GetBlob ep (Container "c") (BlobName "b"))
+      method r `shouldBe` "GET"
+      path r `shouldBe` "/devstoreaccount1/c/b"
 
 listXmlWithMarker :: String
 listXmlWithMarker =

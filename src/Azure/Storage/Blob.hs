@@ -3,6 +3,7 @@
 -- retry, versioning and tracing. A 'BlobService' binds an 'Env' to a resolved
 -- endpoint (production host-style or Azurite path-style).
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Azure.Storage.Blob
   ( -- * Service handle
@@ -13,6 +14,10 @@ module Azure.Storage.Blob
   , productionEndpoint
   , emulatorEndpoint
   , azuriteDefault
+  , AccessTier (..)
+  , PutBlob (..)
+  , newPutBlob
+  , GetBlob (..)
   , BlobPage (..)
   , BlobService (..)
   , blobService
@@ -22,12 +27,16 @@ module Azure.Storage.Blob
   ) where
 
 import Azure.Core.Env (Env)
+import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest, readBody)
 import Azure.Core.Signing (AccountName (..))
+import Data.ByteString (ByteString)
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8)
+import Network.HTTP.Client (Request (..), RequestBody)
+import Network.HTTP.Types.Header (RequestHeaders)
 import Network.HTTP.Types.URI (encodePathSegments)
 import qualified Text.XML as X
 import Text.XML.Cursor (content, element, fromDocument, ($/), (&/))
@@ -40,6 +49,14 @@ newtype BlobEndpoint = BlobEndpoint Text deriving stock (Eq, Show)
 
 data BlobPage = BlobPage {bpNames :: [BlobName], bpNextMarker :: Maybe Text}
   deriving stock (Eq, Show)
+
+data AccessTier = Hot | Cool | Cold | Archive deriving stock (Eq, Show)
+
+tierHeader :: AccessTier -> ByteString
+tierHeader Hot = "Hot"
+tierHeader Cool = "Cool"
+tierHeader Cold = "Cold"
+tierHeader Archive = "Archive"
 
 productionEndpoint :: AccountName -> BlobEndpoint
 productionEndpoint (AccountName a) = BlobEndpoint ("https://" <> a <> ".blob.core.windows.net")
@@ -57,6 +74,54 @@ data BlobService = BlobService {bsEnv :: Env, bsEndpoint :: BlobEndpoint}
 
 blobService :: Env -> BlobEndpoint -> BlobService
 blobService = BlobService
+
+data PutBlob = PutBlob
+  { pbEndpoint :: BlobEndpoint
+  , pbContainer :: Container
+  , pbName :: BlobName
+  , pbBody :: RequestBody
+  , pbContentType :: Maybe ByteString
+  , pbContentMD5 :: Maybe ByteString
+  , pbTier :: Maybe AccessTier
+  }
+
+newPutBlob :: BlobEndpoint -> Container -> BlobName -> RequestBody -> PutBlob
+newPutBlob endpoint container name body =
+  PutBlob endpoint container name body Nothing Nothing Nothing
+
+instance AzureRequest PutBlob where
+  type Rs PutBlob = ()
+
+  authFor _ = StorageAuth
+
+  toRequest _ p = do
+    r <- mkRequest "PUT" (blobResourceUrl (pbEndpoint p) (pbContainer p) (Just (pbName p))) []
+    pure r {requestBody = pbBody p, requestHeaders = requestHeaders r <> putBlobHeaders p}
+
+  fromResponse _ _ _ _ = pure (Right ())
+
+putBlobHeaders :: PutBlob -> RequestHeaders
+putBlobHeaders p =
+  [("x-ms-blob-type", "BlockBlob")]
+    <> maybe [] (\v -> [("Content-Type", v)]) (pbContentType p)
+    <> maybe [] (\v -> [("Content-MD5", v)]) (pbContentMD5 p)
+    <> maybe [] (\t -> [("x-ms-access-tier", tierHeader t)]) (pbTier p)
+
+data GetBlob = GetBlob
+  { gbEndpoint :: BlobEndpoint
+  , gbContainer :: Container
+  , gbName :: BlobName
+  }
+
+instance AzureRequest GetBlob where
+  type Rs GetBlob = LBS.ByteString
+
+  authFor _ = StorageAuth
+
+  toRequest _ g =
+    mkRequest "GET" (blobResourceUrl (gbEndpoint g) (gbContainer g) (Just (gbName g))) []
+
+  fromResponse _ _ _ br = Right <$> readBody br
 
 -- | Base URL + percent-encoded path. Blob-name '/' is preserved as a segment
 -- separator; every other reserved character is encoded. No query string.
