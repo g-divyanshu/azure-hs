@@ -67,7 +67,8 @@ newtype Container = Container Text deriving stock (Eq, Show)
 newtype BlobName = BlobName Text deriving stock (Eq, Show)
 type Prefix = Text
 
-newtype BlobEndpoint = BlobEndpoint Text deriving stock (Eq, Show)
+data BlobEndpoint = BlobEndpoint {beBase :: Text, beAccount :: AccountName}
+  deriving stock (Eq, Show)
 
 data BlobPage = BlobPage {bpNames :: [BlobName], bpNextMarker :: Maybe Text}
   deriving stock (Eq, Show)
@@ -81,13 +82,13 @@ tierHeader Cold = "Cold"
 tierHeader Archive = "Archive"
 
 productionEndpoint :: AccountName -> BlobEndpoint
-productionEndpoint (AccountName a) = BlobEndpoint ("https://" <> a <> ".blob.core.windows.net")
+productionEndpoint a@(AccountName n) = BlobEndpoint ("https://" <> n <> ".blob.core.windows.net") a
 
 -- | @emulatorEndpoint baseUrl account@ - path-style, e.g. baseUrl
 -- @http://127.0.0.1:10000@ and account @devstoreaccount1@. baseUrl must have
 -- no trailing slash.
 emulatorEndpoint :: Text -> AccountName -> BlobEndpoint
-emulatorEndpoint base (AccountName a) = BlobEndpoint (T.dropWhileEnd (== '/') base <> "/" <> a)
+emulatorEndpoint base a@(AccountName n) = BlobEndpoint (T.dropWhileEnd (== '/') base <> "/" <> n) a
 
 azuriteDefault :: BlobEndpoint
 azuriteDefault = emulatorEndpoint "http://127.0.0.1:10000" (AccountName "devstoreaccount1")
@@ -257,12 +258,12 @@ listBlobNamesPaged bs c pfx maxN = go Nothing []
 presignedUrl :: BlobService -> Container -> BlobName -> NominalDiffTime -> IO Text
 presignedUrl bs c@(Container cont) n@(BlobName blob) ttl =
   case storeCredential (envCredential (bsEnv bs)) of
-    AccountKey name key -> do
+    AccountKey _ key -> do
       now <- getCurrentTime
-      let BlobEndpoint base = bsEndpoint bs
+      let base = beBase (bsEndpoint bs)
           proto = if "https://" `T.isPrefixOf` base then HttpsOnly else HttpsOrHttp
           spec = (newBlobReadSpec cont blob (addUTCTime ttl now)) {sasProtocol = proto}
-      pure (blobResourceUrl (bsEndpoint bs) c (Just n) <> "?" <> serviceSas name key spec)
+      pure (blobResourceUrl (bsEndpoint bs) c (Just n) <> "?" <> serviceSas (beAccount (bsEndpoint bs)) key spec)
     _ ->
       throwIO
         (AuthError "presignedUrl needs an account-key credential; a user-delegation SAS is the Entra path")
@@ -270,8 +271,8 @@ presignedUrl bs c@(Container cont) n@(BlobName blob) ttl =
 -- | Base URL + percent-encoded path. Blob-name '/' is preserved as a segment
 -- separator; every other reserved character is encoded. No query string.
 blobResourceUrl :: BlobEndpoint -> Container -> Maybe BlobName -> Text
-blobResourceUrl (BlobEndpoint base) (Container c) mb =
-  base <> decodeUtf8 (LBS.toStrict (toLazyByteString (encodePathSegments segs)))
+blobResourceUrl ep (Container c) mb =
+  beBase ep <> decodeUtf8 (LBS.toStrict (toLazyByteString (encodePathSegments segs)))
  where
   segs = c : maybe [] (\(BlobName b) -> T.splitOn "/" b) mb
 
