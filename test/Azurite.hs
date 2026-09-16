@@ -82,6 +82,11 @@ startAzurite port dir = do
           , "--location"
           , dir
           , "--silent"
+          , -- The library's default x-ms-version tracks the current Azure
+            -- Storage REST API and can be newer than the locally installed
+            -- Azurite supports; skip Azurite's version gate rather than
+            -- pinning tests to whatever version Azurite last shipped.
+            "--skipApiVersionCheck"
           ]
       )
   pure ph

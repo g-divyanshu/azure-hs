@@ -24,6 +24,12 @@ module Azure.Storage.Blob
   , ListBlobs (..)
   , BlobService (..)
   , blobService
+    -- * Ergonomic helpers
+  , putBlob_
+  , getBlob_
+  , blobExists
+  , listBlobNames
+  , listBlobNamesPaged
     -- * Internal (exposed for tests)
   , blobResourceUrl
   , parseBlobList
@@ -31,9 +37,12 @@ module Azure.Storage.Blob
   ) where
 
 import Azure.Core.Env (Env)
-import Azure.Core.Error (AzureError (..))
+import Azure.Core.Error (AzureError (..), errorStatus)
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest, readBody)
+import Azure.Core.Send (send, trySend)
 import Azure.Core.Signing (AccountName (..))
+import Control.Exception (throwIO)
+import Control.Monad.Trans.Resource (runResourceT)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BC
 import Data.ByteString.Builder (toLazyByteString)
@@ -42,8 +51,8 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
-import Network.HTTP.Client (Request (..), RequestBody)
-import Network.HTTP.Types (ResponseHeaders)
+import Network.HTTP.Client (Request (..), RequestBody (..))
+import Network.HTTP.Types (ResponseHeaders, statusCode)
 import Network.HTTP.Types.Header (RequestHeaders)
 import Network.HTTP.Types.URI (encodePathSegments)
 import Text.Read (readMaybe)
@@ -192,6 +201,48 @@ instance AzureRequest ListBlobs where
   fromResponse _ _ _ br = do
     body <- readBody br
     pure (either (Left . SerializeError) Right (parseBlobList body))
+
+-- | Upload @body@ as a block blob, replacing any existing blob of the same
+-- name.
+putBlob_ :: BlobService -> Container -> BlobName -> ByteString -> IO ()
+putBlob_ bs c n body =
+  runResourceT (send (bsEnv bs) (newPutBlob (bsEndpoint bs) c n (RequestBodyBS body)))
+
+-- | Download a blob's full contents.
+getBlob_ :: BlobService -> Container -> BlobName -> IO LBS.ByteString
+getBlob_ bs c n = runResourceT (send (bsEnv bs) (GetBlob (bsEndpoint bs) c n))
+
+-- | Whether a blob exists. Folds a 404 response into 'False'; any other
+-- error (network failure, auth failure, 5xx, ...) is rethrown.
+blobExists :: BlobService -> Container -> BlobName -> IO Bool
+blobExists bs c n = do
+  r <- runResourceT (trySend (bsEnv bs) (GetBlobProperties (bsEndpoint bs) c n))
+  case r of
+    Right _ -> pure True
+    Left e
+      | (statusCode <$> errorStatus e) == Just 404 -> pure False
+      | otherwise -> throwIO e
+
+-- | All blob names under a prefix, using Azure's default page size.
+listBlobNames :: BlobService -> Container -> Prefix -> IO [BlobName]
+listBlobNames bs c pfx = listBlobNamesPaged bs c pfx 0
+
+-- | Like 'listBlobNames', but with an explicit @maxresults@ per page
+-- (@maxN <= 0@ omits it, falling back to the server default). Follows
+-- 'bpNextMarker' to exhaustion. Exported so tests can force real
+-- marker-following with a small page size.
+listBlobNamesPaged :: BlobService -> Container -> Prefix -> Int -> IO [BlobName]
+listBlobNamesPaged bs c pfx maxN = go Nothing []
+  where
+    mmax = if maxN > 0 then Just maxN else Nothing
+    go marker acc = do
+      page <-
+        runResourceT
+          (send (bsEnv bs) (ListBlobs (bsEndpoint bs) c (Just pfx) marker mmax))
+      let acc' = acc <> bpNames page
+      case bpNextMarker page of
+        Just m | not (T.null m) -> go (Just m) acc'
+        _ -> pure acc'
 
 -- | Base URL + percent-encoded path. Blob-name '/' is preserved as a segment
 -- separator; every other reserved character is encoded. No query string.

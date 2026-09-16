@@ -1,33 +1,69 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module BlobSpec (spec) where
 
 import Azure.Core.Env (newEnv)
-import Azure.Core.Request (AzureRequest (toRequest))
+import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest)
+import Azure.Core.Send (send)
 import Azure.Core.Signing (AccountName (..), mkAccountKey)
 import Azure.Identity (fromAccountKey)
 import Azure.Storage.Blob
-  ( BlobName (..)
+  ( BlobEndpoint
+  , BlobName (..)
   , BlobPage (..)
   , BlobProperties (..)
+  , BlobService (..)
   , Container (..)
   , GetBlob (..)
   , GetBlobProperties (..)
   , ListBlobs (..)
   , blobResourceUrl
+  , blobService
+  , blobExists
   , emulatorEndpoint
+  , getBlob_
+  , listBlobNamesPaged
   , newPutBlob
   , parseBlobList
   , parseBlobProperties
   , productionEndpoint
+  , putBlob_
   )
-import Azurite (withAzurite)
+import Azurite (azuriteAccount, azuriteKey, withAzurite)
+import Control.Monad (forM_)
+import Control.Monad.Trans.Resource (runResourceT)
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy.Char8 as LC
 import qualified Data.Text as T
 import Network.HTTP.Client (RequestBody (..), httpLbs, method, parseRequest, path, queryString, requestHeaders, responseStatus)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Test.Hspec
+
+-- | Test-only: @PUT {container}?restype=container@. Container creation is
+-- out of library scope, so the round-trip fixtures below send this directly
+-- through the core pipeline. This also demonstrates the extensibility
+-- claim: a new operation is a type plus an 'AzureRequest' instance, with no
+-- change to "Azure.Core".
+data CreateContainer = CreateContainer BlobEndpoint Container
+
+instance AzureRequest CreateContainer where
+  type Rs CreateContainer = ()
+  authFor _ = StorageAuth
+  toRequest _ (CreateContainer e c) =
+    mkRequest "PUT" (blobResourceUrl e c Nothing) [("restype", Just "container")]
+  fromResponse _ _ _ _ = pure (Right ())
+
+-- | Azurite spin-up costs real wall-clock time, so the round-trip group
+-- below shares ONE emulator (via hspec's 'aroundAll') instead of paying that
+-- cost per test. Each test creates its own uniquely-named container so the
+-- shared instance never lets one test's fixtures bleed into another's.
+withBlobService :: (BlobService -> IO ()) -> IO ()
+withBlobService k = withAzurite $ \base -> do
+  mgr <- newTlsManager
+  key <- either (fail . T.unpack) pure (mkAccountKey azuriteKey)
+  env <- newEnv mgr (pure (fromAccountKey (AccountName azuriteAccount) key))
+  k (blobService env (emulatorEndpoint base (AccountName azuriteAccount)))
 
 spec :: Spec
 spec = describe "Azure.Storage.Blob" $ do
@@ -106,6 +142,48 @@ spec = describe "Azure.Storage.Blob" $ do
         req <- parseRequest (T.unpack (base <> "/devstoreaccount1?comp=list"))
         resp <- httpLbs req mgr -- unauthenticated: Azurite answers (e.g. 403/400), not a connection error
         responseStatus resp `seq` pure () -- reaching here means the server is up and reachable
+  aroundAll withBlobService $
+    describe "round-trips (Azurite)" $ do
+      it "put then get returns the bytes" $ \bs -> do
+        let c = Container "rt1"
+        runResourceT (send (bsEnv bs) (CreateContainer (bsEndpoint bs) c))
+        putBlob_ bs c (BlobName "hello.txt") "hello world"
+        got <- getBlob_ bs c (BlobName "hello.txt")
+        got `shouldBe` "hello world"
+
+      it "properties report the uploaded length" $ \bs -> do
+        let c = Container "rt2"
+        runResourceT (send (bsEnv bs) (CreateContainer (bsEndpoint bs) c))
+        putBlob_ bs c (BlobName "b") "abcde"
+        p <- runResourceT (send (bsEnv bs) (GetBlobProperties (bsEndpoint bs) c (BlobName "b")))
+        bpContentLength p `shouldBe` 5
+
+      it "exists is True for a present blob and False for a missing one" $ \bs -> do
+        let c = Container "rt3"
+        runResourceT (send (bsEnv bs) (CreateContainer (bsEndpoint bs) c))
+        putBlob_ bs c (BlobName "here") "x"
+        blobExists bs c (BlobName "here") `shouldReturn` True
+        blobExists bs c (BlobName "missing") `shouldReturn` False
+
+      it "listBlobNamesPaged follows the marker across pages" $ \bs -> do
+        let c = Container "rt4"
+        runResourceT (send (bsEnv bs) (CreateContainer (bsEndpoint bs) c))
+        forM_ [1 .. 5 :: Int] $ \i ->
+          putBlob_ bs c (BlobName (T.pack ("p/" <> show i))) "y"
+        names <- listBlobNamesPaged bs c "p/" 2 -- force paging with maxresults=2
+        length names `shouldBe` 5
+
+      it "a zero-length blob round-trips" $ \bs -> do
+        let c = Container "rt5"
+        runResourceT (send (bsEnv bs) (CreateContainer (bsEndpoint bs) c))
+        putBlob_ bs c (BlobName "empty") ""
+        getBlob_ bs c (BlobName "empty") `shouldReturn` ""
+
+      it "a name with a space and a slash round-trips" $ \bs -> do
+        let c = Container "rt6"
+        runResourceT (send (bsEnv bs) (CreateContainer (bsEndpoint bs) c))
+        putBlob_ bs c (BlobName "a b/c d") "z"
+        getBlob_ bs c (BlobName "a b/c d") `shouldReturn` "z"
 
 listXmlWithMarker :: String
 listXmlWithMarker =
