@@ -29,6 +29,7 @@ library
     Azure.Core.Logger
     Azure.Core.Request
     Azure.Core.Retry
+    Azure.Core.SAS
     Azure.Core.Send
     Azure.Core.Signing
     Azure.Identity
@@ -76,6 +77,7 @@ test-suite spec
     LoggerSpec
     RequestSpec
     RetrySpec
+    SasSpec
     SendSpec
     SigningSpec
     StubServer
