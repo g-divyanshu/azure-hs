@@ -32,6 +32,7 @@ module Azure.Storage.Blob
   , listBlobNames
   , listBlobNamesPaged
   , presignedUrl
+  , userDelegationPresignedUrl
     -- * Internal (exposed for tests)
   , blobResourceUrl
   , parseBlobList
@@ -43,7 +44,7 @@ import Azure.Core.Credential (Credential (..), storageScope, storeCredential)
 import Azure.Core.Env (Env, envCredential)
 import Azure.Core.Error (AzureError (..), errorStatus)
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest, readBody)
-import Azure.Core.SAS (SasProtocol (..), SasSpec (..), UserDelegationKey, mkUserDelegationKey, newBlobReadSpec, serviceSas)
+import Azure.Core.SAS (SasProtocol (..), SasSpec (..), UserDelegationKey, mkUserDelegationKey, newBlobReadSpec, serviceSas, userDelegationSas)
 import Azure.Core.Send (send, trySend)
 import Azure.Core.Signing (AccountName (..))
 import Control.Exception (throwIO)
@@ -56,7 +57,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
-import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, addUTCTime, defaultTimeLocale, formatTime, getCurrentTime)
 import Network.HTTP.Client (Request (..), RequestBody (..))
 import Network.HTTP.Types (ResponseHeaders, statusCode)
 import Network.HTTP.Types.Header (RequestHeaders)
@@ -291,7 +292,24 @@ presignedUrl bs c@(Container cont) n@(BlobName blob) ttl =
       pure (blobResourceUrl (bsEndpoint bs) c (Just n) <> "?" <> serviceSas (beAccount (bsEndpoint bs)) key spec)
     _ ->
       throwIO
-        (AuthError "presignedUrl needs an account-key credential; a user-delegation SAS is the Entra path")
+        (AuthError "presignedUrl needs an account-key credential; a user-delegation SAS is the Entra path (see userDelegationPresignedUrl)")
+
+-- | A time-limited anonymous read URL for a blob, signed with a user
+-- delegation key (Microsoft Entra). Requires an Entra credential with the
+-- Storage Blob Delegator role. Fetches a fresh delegation key per call
+-- (see the plan's Task 9 for optional caching).
+userDelegationPresignedUrl :: BlobService -> Container -> BlobName -> NominalDiffTime -> IO Text
+userDelegationPresignedUrl bs c@(Container cont) n@(BlobName blob) ttl = do
+  now <- getCurrentTime
+  let keyStart = iso (addUTCTime (-300) now)
+      keyExpiry = iso (addUTCTime ttl now)
+  key <- runResourceT (send (bsEnv bs) (GetUserDelegationKey (bsEndpoint bs) keyStart keyExpiry))
+  let base = beBase (bsEndpoint bs)
+      proto = if "https://" `T.isPrefixOf` base then HttpsOnly else HttpsOrHttp
+      spec = (newBlobReadSpec cont blob (addUTCTime ttl now)) {sasProtocol = proto}
+  pure (blobResourceUrl (bsEndpoint bs) c (Just n) <> "?" <> userDelegationSas (beAccount (bsEndpoint bs)) key spec)
+  where
+    iso = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ"
 
 -- | Base URL + percent-encoded path. Blob-name '/' is preserved as a segment
 -- separator; every other reserved character is encoded. No query string.

@@ -33,6 +33,7 @@ import Azure.Storage.Blob
   , presignedUrl
   , productionEndpoint
   , putBlob_
+  , userDelegationPresignedUrl
   )
 import Azure.Core.SAS (UserDelegationKey (..))
 import Azurite (azuriteAccount, azuriteKey, withAzurite)
@@ -47,6 +48,7 @@ import Data.Time (addUTCTime, getCurrentTime)
 import Network.HTTP.Client (RequestBody (..), httpLbs, method, parseRequest, path, queryString, requestHeaders, responseBody, responseStatus)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types (status200, statusCode)
+import Network.HTTP.Types.URI (parseSimpleQuery)
 import StubServer (Recorded (..), withStub)
 import Test.Hspec
 
@@ -185,6 +187,18 @@ spec = describe "Azure.Storage.Blob" $ do
         recMethod rec `shouldBe` "POST"
         lookup "Authorization" (recHeaders rec) `shouldBe` Just "Bearer fake-token"
         recBody rec `shouldSatisfy` (\b -> BC.pack "KeyInfo" `BC.isInfixOf` LC.toStrict b)
+  describe "userDelegationPresignedUrl (stub server)" $
+    it "fetches a delegation key and returns a URL carrying a user-delegation SAS" $
+      withStub [(status200, [], LC.pack udkXml)] $ \base _recorded -> do
+        mgr <- newTlsManager
+        now <- getCurrentTime
+        let src = TokenSource "fake" $ \_ _ -> pure (AccessToken "fake-token" (addUTCTime 3600 now))
+        env <- newEnv mgr (pure (Entra src))
+        let bs = blobService env (emulatorEndpoint base (AccountName "devstoreaccount1"))
+        url <- userDelegationPresignedUrl bs (Container "c") (BlobName "b.txt") 300
+        let q = parseSimpleQuery (BC.pack (drop 1 (dropWhile (/= '?') (T.unpack url))))
+        lookup "skoid" q `shouldBe` Just "11111111-1111-1111-1111-111111111111"
+        lookup "sig" q `shouldSatisfy` maybe False (not . BC.null)
   describe "withAzurite" $
     it "starts an Azurite blob endpoint that answers HTTP" $
       withAzurite $ \base -> do
