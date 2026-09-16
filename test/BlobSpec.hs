@@ -186,6 +186,7 @@ spec = describe "Azure.Storage.Blob" $ do
         [rec] <- recorded
         recMethod rec `shouldBe` "POST"
         lookup "Authorization" (recHeaders rec) `shouldBe` Just "Bearer fake-token"
+        lookup "x-ms-version" (recHeaders rec) `shouldBe` Just "2020-12-06"
         recBody rec `shouldSatisfy` (\b -> BC.pack "KeyInfo" `BC.isInfixOf` LC.toStrict b)
   describe "userDelegationPresignedUrl (stub server)" $
     it "fetches a delegation key and returns a URL carrying a user-delegation SAS" $

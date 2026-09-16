@@ -44,7 +44,7 @@ import Azure.Core.Credential (Credential (..), storageScope, storeCredential)
 import Azure.Core.Env (Env, envCredential)
 import Azure.Core.Error (AzureError (..), errorStatus)
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest, readBody)
-import Azure.Core.SAS (SasProtocol (..), SasSpec (..), UserDelegationKey, mkUserDelegationKey, newBlobReadSpec, serviceSas, userDelegationSas)
+import Azure.Core.SAS (SasProtocol (..), SasSpec (..), UserDelegationKey, mkUserDelegationKey, newBlobReadSpec, sasSignedVersion, serviceSas, userDelegationSas)
 import Azure.Core.Send (send, trySend)
 import Azure.Core.Signing (AccountName (..))
 import Control.Exception (throwIO)
@@ -223,7 +223,10 @@ instance AzureRequest GetUserDelegationKey where
 
   toRequest _ g = do
     r <- mkRequest "POST" (beBase (gudkEndpoint g) <> "/") [("restype", Just "service"), ("comp", Just "userdelegationkey")]
-    pure r {requestBody = RequestBodyBS (keyInfoBody (gudkStart g) (gudkExpiry g))}
+    pure r
+      { requestBody = RequestBodyBS (keyInfoBody (gudkStart g) (gudkExpiry g))
+      , requestHeaders = ("x-ms-version", sasSignedVersion) : requestHeaders r
+      }
 
   fromResponse _ _ _ br = do
     body <- readBody br
