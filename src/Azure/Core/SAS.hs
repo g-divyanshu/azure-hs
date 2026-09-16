@@ -21,10 +21,14 @@ module Azure.Core.SAS
     -- * Service SAS (account-key signed)
   , serviceSasStringToSign
   , serviceSas
+    -- * User Delegation SAS
+  , UserDelegationKey (..)
+  , mkUserDelegationKey
   ) where
 
 import Azure.Core.Signing (AccountKey, AccountName (..), signWithAccountKey)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Base64 as B64
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -161,3 +165,23 @@ serviceSas acct key spec = decodeUtf8 (renderSimpleQuery False params)
         <> opt "si" (sasIdentifier spec)
         <> opt "ses" (sasEncryptionScope spec)
         <> [("sig", sig)]
+
+-- | The parsed 'Get User Delegation Key' response. The six text fields are
+-- echoed verbatim into the SAS (@skoid sktid skt ske sks skv@); 'udkKeyBytes'
+-- is the base64-decoded @Value@, used as the HMAC key.
+data UserDelegationKey = UserDelegationKey
+  { udkObjectId :: Text
+  , udkTenantId :: Text
+  , udkStart :: Text
+  , udkExpiry :: Text
+  , udkService :: Text
+  , udkVersion :: Text
+  , udkKeyBytes :: ByteString
+  }
+
+-- | Build a 'UserDelegationKey', base64-decoding the key @Value@.
+mkUserDelegationKey :: Text -> Text -> Text -> Text -> Text -> Text -> Text -> Either Text UserDelegationKey
+mkUserDelegationKey skoid sktid skt ske sks skv value =
+  case B64.decode (encodeUtf8 (T.strip value)) of
+    Left e -> Left ("user delegation key Value is not valid base64: " <> T.pack e)
+    Right bs -> Right (UserDelegationKey skoid sktid skt ske sks skv bs)

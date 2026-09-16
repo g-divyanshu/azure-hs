@@ -91,3 +91,14 @@ spec = do
       lookup "st" q `shouldBe` Just "2024-12-31T00:00:00Z"
       lookup "sip" q `shouldBe` Just "198.51.100.10"
       lookup "ses" q `shouldBe` Just "myscope"
+
+  describe "mkUserDelegationKey" $ do
+    it "accepts a valid base64 Value" $
+      either (const False) (const True)
+        (mkUserDelegationKey "oid" "tid" "s" "e" "b" "2020-12-06"
+           "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==")
+        `shouldBe` True
+    it "rejects a Value that is not base64" $
+      either (const True) (const False)
+        (mkUserDelegationKey "oid" "tid" "s" "e" "b" "2020-12-06" "not base64!!")
+        `shouldBe` True
