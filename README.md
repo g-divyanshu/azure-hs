@@ -66,6 +66,35 @@ scope (e.g. pagination) and wants each connection returned promptly should
 wrap each call in its own `runResourceT`, or fully force the result before
 continuing.
 
+## Azure.Identity
+
+`discover` resolves an ambient Entra credential from the environment, in order:
+`AZURE_CLIENT_SECRET`, then `AZURE_CLIENT_CERTIFICATE_PATH`, then
+`AZURE_FEDERATED_TOKEN_FILE`, then IMDS (managed identity). Options 1–3 also
+need `AZURE_TENANT_ID` and `AZURE_CLIENT_ID`; a trigger set without its
+companions is an error, not a silent fall-through.
+
+```haskell
+import Azure.Core
+import Azure.Identity (discover)
+import Network.HTTP.Client.TLS (newTlsManager)
+
+main :: IO ()
+main = do
+  mgr  <- newTlsManager
+  cred <- discover mgr                 -- picks up the ambient credential
+  env  <- newEnv mgr (pure cred)
+  ...
+```
+
+Explicit credentials that are never auto-discovered:
+
+- `clientSecretCredential` (paired with `mkClientSecret`)
+- `clientCertificateCredential` (paired with `loadClientCertificatePem`)
+- `workloadIdentityCredential`
+- `managedIdentityCredential`
+- `fromAccountKey`, `fromConnectionString`, `fromSasToken`
+
 ## Errors
 
 `ServiceError` carries the HTTP status, Azure's error code, the message and
