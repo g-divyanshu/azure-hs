@@ -95,6 +95,56 @@ Explicit credentials that are never auto-discovered:
 - `managedIdentityCredential`
 - `fromAccountKey`, `fromConnectionString`, `fromSasToken`
 
+## Azure.Storage.Blob
+
+Bind an `Env` to a blob endpoint with `blobService`, then reach for the
+ergonomic helpers:
+
+```haskell
+import Azure.Core
+import Azure.Identity (discover)
+import Azure.Storage.Blob
+import Network.HTTP.Client.TLS (newTlsManager)
+
+main :: IO ()
+main = do
+  mgr <- newTlsManager
+  env <- newEnv mgr (discover mgr)
+  let bs = blobService env (productionEndpoint (AccountName "myaccount"))
+  putBlob_ bs (Container "images") (BlobName "logo.png") pngBytes -- pngBytes :: ByteString
+  bytes <- getBlob_ bs (Container "images") (BlobName "logo.png")
+  here  <- blobExists bs (Container "images") (BlobName "logo.png")
+  names <- listBlobNames bs (Container "images") "thumb/"
+  pure ()
+```
+
+`blobService :: Env -> BlobEndpoint -> BlobService` is the only place an
+`Env` and an endpoint meet; every helper afterwards just takes the
+`BlobService`, a `Container` and a `BlobName`. `listBlobNames` pages through
+`ListBlobs`, following the response's `NextMarker` to exhaustion, so it can
+make several requests for a large container. `blobExists` calls
+`GetBlobProperties` and folds a 404 response into `False`; any other error
+(auth failure, 5xx, a network problem) is rethrown.
+
+Against Azurite, swap in `emulatorEndpoint`/`azuriteDefault` (path-style: the
+account name lives in the URL path, not the host) and a Shared Key
+credential — `Azure.Identity` provides `fromAccountKey` for this:
+
+```haskell
+import Azure.Core
+import Azure.Identity (fromAccountKey)
+import Azure.Storage.Blob
+import Network.HTTP.Client.TLS (newTlsManager)
+
+main :: IO ()
+main = do
+  mgr <- newTlsManager
+  key <- either (fail . show) pure (mkAccountKey "<azurite account key>")
+  env <- newEnv mgr (pure (fromAccountKey (AccountName "devstoreaccount1") key))
+  let bs = blobService env azuriteDefault -- == emulatorEndpoint "http://127.0.0.1:10000" (AccountName "devstoreaccount1")
+  ...
+```
+
 ## Errors
 
 `ServiceError` carries the HTTP status, Azure's error code, the message and
