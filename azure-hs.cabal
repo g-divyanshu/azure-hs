@@ -32,6 +32,7 @@ library
     Azure.Core.Send
     Azure.Core.Signing
     Azure.Identity
+    Azure.Storage.Blob
   build-depends:
     , aeson              >=2.2   && <2.3
     , asn1-encoding      >=0.9   && <0.10
@@ -65,6 +66,7 @@ test-suite spec
   hs-source-dirs:     test
   main-is:            Spec.hs
   other-modules:
+    BlobSpec
     CoreSpec
     CredentialSpec
     ErrorSpec
