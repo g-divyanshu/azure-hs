@@ -25,9 +25,10 @@ module Azure.Core.SAS
   , UserDelegationKey (..)
   , mkUserDelegationKey
   , userDelegationSasStringToSign
+  , userDelegationSas
   ) where
 
-import Azure.Core.Signing (AccountKey, AccountName (..), signWithAccountKey)
+import Azure.Core.Signing (AccountKey, AccountName (..), hmacSha256Base64, signWithAccountKey)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Base64 as B64
 import Data.Maybe (fromMaybe)
@@ -220,3 +221,30 @@ userDelegationSasStringToSign acct key spec = encodeUtf8 (T.intercalate "\n" fie
       , "" -- rscl
       , "" -- rsct
       ]
+
+-- | Sign @spec@ with the user delegation @key@ and return the SAS token: the
+-- query string (no leading @?@), every value URL-encoded. Includes the six
+-- @sk*@ delegation-key parameters that the service needs to re-derive the key.
+userDelegationSas :: AccountName -> UserDelegationKey -> SasSpec -> Text
+userDelegationSas acct key spec = decodeUtf8 (renderSimpleQuery False params)
+  where
+    sig = hmacSha256Base64 (udkKeyBytes key) (userDelegationSasStringToSign acct key spec)
+    opt name = maybe [] (\v -> [(name, encodeUtf8 v)])
+    params =
+      [ ("sv", sasSignedVersion)
+      , ("sr", encodeUtf8 (sasResourceCode (sasResource spec)))
+      , ("sp", encodeUtf8 (renderPermissions (sasPermissions spec)))
+      ]
+        <> opt "st" (sasTime <$> sasStart spec)
+        <> [("se", encodeUtf8 (sasTime (sasExpiry spec)))]
+        <> opt "sip" (sasIP spec)
+        <> [("spr", encodeUtf8 (sasProtocolValue (sasProtocol spec)))]
+        <> [ ("skoid", encodeUtf8 (udkObjectId key))
+           , ("sktid", encodeUtf8 (udkTenantId key))
+           , ("skt", encodeUtf8 (udkStart key))
+           , ("ske", encodeUtf8 (udkExpiry key))
+           , ("sks", encodeUtf8 (udkService key))
+           , ("skv", encodeUtf8 (udkVersion key))
+           ]
+        <> opt "ses" (sasEncryptionScope spec)
+        <> [("sig", sig)]

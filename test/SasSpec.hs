@@ -124,3 +124,22 @@ spec = do
       let f = C.split '\n' (userDelegationSasStringToSign acct udk s)
       (f !! 4) `shouldBe` "00000000-0000-0000-0000-000000000001"
       (f !! 9) `shouldBe` "2020-12-06"
+
+  describe "userDelegationSas: the assembled token" $ do
+    let s = newBlobReadSpec "mycontainer" "myblob.txt" expiry
+        q = parseSimpleQuery (C.pack (T.unpack (userDelegationSas acct udk s)))
+    it "signs with the delegation key: matches the independent reference signature" $
+      lookup "sig" q `shouldBe` Just "g614/TDknKYx245a8Iuf+qplG2HGbyAN1PA5mnMhy20="
+    it "carries the six user-delegation key parameters" $ do
+      lookup "skoid" q `shouldBe` Just "00000000-0000-0000-0000-000000000001"
+      lookup "sktid" q `shouldBe` Just "00000000-0000-0000-0000-000000000002"
+      lookup "skt" q `shouldBe` Just "2024-12-31T00:00:00Z"
+      lookup "ske" q `shouldBe` Just "2025-01-07T00:00:00Z"
+      lookup "sks" q `shouldBe` Just "b"
+      lookup "skv" q `shouldBe` Just "2020-12-06"
+    it "still carries sv, sr, sp, se, spr and sig, and no account-key artifacts" $ do
+      lookup "sv" q `shouldBe` Just "2020-12-06"
+      lookup "sr" q `shouldBe` Just "b"
+      lookup "sp" q `shouldBe` Just "r"
+      lookup "se" q `shouldBe` Just "2025-01-01T00:00:00Z"
+      lookup "spr" q `shouldBe` Just "https"
