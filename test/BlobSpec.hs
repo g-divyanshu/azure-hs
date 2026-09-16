@@ -9,21 +9,31 @@ import Azure.Identity (fromAccountKey)
 import Azure.Storage.Blob
   ( BlobName (..)
   , BlobPage (..)
+  , BlobProperties (..)
   , Container (..)
   , GetBlob (..)
+  , GetBlobProperties (..)
+  , ListBlobs (..)
   , blobResourceUrl
   , emulatorEndpoint
   , newPutBlob
   , parseBlobList
+  , parseBlobProperties
   , productionEndpoint
   )
+import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy.Char8 as LC
-import Network.HTTP.Client (RequestBody (..), method, path, requestHeaders)
+import Network.HTTP.Client (RequestBody (..), method, path, queryString, requestHeaders)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "Azure.Storage.Blob" $ do
+  let ep = emulatorEndpoint "http://127.0.0.1:10000" (AccountName "devstoreaccount1")
+      dummyEnv = do
+        mgr <- newTlsManager
+        key <- either (fail . show) pure (mkAccountKey "Zm9vYmFy")
+        newEnv mgr (pure (fromAccountKey (AccountName "devstoreaccount1") key))
   describe "blobResourceUrl" $ do
     it "builds a production host-style URL, encoding segments but keeping '/'" $
       blobResourceUrl (productionEndpoint (AccountName "acct")) (Container "c") (Just (BlobName "a b/d"))
@@ -46,11 +56,6 @@ spec = describe "Azure.Storage.Blob" $ do
       parseBlobList (LC.pack listXmlEmpty)
         `shouldBe` Right (BlobPage [] Nothing)
   describe "PutBlob/GetBlob toRequest" $ do
-    let ep = emulatorEndpoint "http://127.0.0.1:10000" (AccountName "devstoreaccount1")
-        dummyEnv = do
-          mgr <- newTlsManager
-          key <- either (fail . show) pure (mkAccountKey "Zm9vYmFy")
-          newEnv mgr (pure (fromAccountKey (AccountName "devstoreaccount1") key))
     it "PutBlob is a PUT with x-ms-blob-type BlockBlob and the encoded path" $ do
       env <- dummyEnv
       r <- toRequest env (newPutBlob ep (Container "c") (BlobName "b") (RequestBodyBS "hi"))
@@ -62,6 +67,36 @@ spec = describe "Azure.Storage.Blob" $ do
       r <- toRequest env (GetBlob ep (Container "c") (BlobName "b"))
       method r `shouldBe` "GET"
       path r `shouldBe` "/devstoreaccount1/c/b"
+  describe "parseBlobProperties" $
+    it "reads Content-Length, Content-Type, ETag and blob type from headers" $ do
+      let hdrs =
+            [ ("Content-Length", "11")
+            , ("Content-Type", "text/plain")
+            , ("ETag", "\"0x8D\"")
+            , ("x-ms-blob-type", "BlockBlob")
+            ]
+          p = parseBlobProperties hdrs
+      bpContentLength p `shouldBe` 11
+      bpContentType p `shouldBe` Just "text/plain"
+      bpETag p `shouldBe` Just "\"0x8D\""
+      bpBlobType p `shouldBe` Just "BlockBlob"
+  describe "GetBlobProperties toRequest" $
+    it "is a HEAD at the blob path" $ do
+      env <- dummyEnv
+      r <- toRequest env (GetBlobProperties ep (Container "c") (BlobName "b"))
+      method r `shouldBe` "HEAD"
+      path r `shouldBe` "/devstoreaccount1/c/b"
+  describe "ListBlobs toRequest" $
+    it "is a GET with restype=container&comp=list and the prefix/maxresults query" $ do
+      env <- dummyEnv
+      r <- toRequest env (ListBlobs ep (Container "c") (Just "logs/") Nothing (Just 2))
+      method r `shouldBe` "GET"
+      path r `shouldBe` "/devstoreaccount1/c"
+      let q = BC.unpack (queryString r)
+      q `shouldContain` "restype=container"
+      q `shouldContain` "comp=list"
+      q `shouldContain` "prefix=logs"
+      q `shouldContain` "maxresults=2"
 
 listXmlWithMarker :: String
 listXmlWithMarker =
