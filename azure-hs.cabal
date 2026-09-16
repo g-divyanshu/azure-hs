@@ -66,6 +66,7 @@ test-suite spec
   hs-source-dirs:     test
   main-is:            Spec.hs
   other-modules:
+    Azurite
     BlobSpec
     CoreSpec
     CredentialSpec
@@ -97,7 +98,9 @@ test-suite spec
     , hspec
     , lens
     , memory
+    , network
     , pem
+    , process
     , resourcet
     , text
     , time

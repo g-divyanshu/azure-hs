@@ -21,9 +21,11 @@ import Azure.Storage.Blob
   , parseBlobProperties
   , productionEndpoint
   )
+import Azurite (withAzurite)
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy.Char8 as LC
-import Network.HTTP.Client (RequestBody (..), method, path, queryString, requestHeaders)
+import qualified Data.Text as T
+import Network.HTTP.Client (RequestBody (..), httpLbs, method, parseRequest, path, queryString, requestHeaders, responseStatus)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Test.Hspec
 
@@ -97,6 +99,13 @@ spec = describe "Azure.Storage.Blob" $ do
       q `shouldContain` "comp=list"
       q `shouldContain` "prefix=logs"
       q `shouldContain` "maxresults=2"
+  describe "withAzurite" $
+    it "starts an Azurite blob endpoint that answers HTTP" $
+      withAzurite $ \base -> do
+        mgr <- newTlsManager
+        req <- parseRequest (T.unpack (base <> "/devstoreaccount1?comp=list"))
+        resp <- httpLbs req mgr -- unauthenticated: Azurite answers (e.g. 403/400), not a connection error
+        responseStatus resp `seq` pure () -- reaching here means the server is up and reachable
 
 listXmlWithMarker :: String
 listXmlWithMarker =
