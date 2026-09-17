@@ -1,10 +1,19 @@
 # azure-hs
 
-A Haskell SDK for a working subset of Microsoft Azure: Blob Storage, ACS Email and
-Entra ID. It builds with GHC 9.6. Licensed under the MIT license.
+A hand-written Haskell SDK for a working subset of Microsoft Azure, built for GHC 9.6.
+It covers three services on one shared core:
 
-This README covers the core. Service modules (`Azure.Identity`, `Azure.Storage.Blob`,
-`Azure.Communication.Email`) add their own sections as they land.
+- **Azure.Identity** — Entra ID credentials: client secret, certificate, workload
+  identity federation, and managed identity (IMDS), with ambient discovery.
+- **Azure.Storage.Blob** — block-blob upload, download, properties, paged list, and
+  time-limited read URLs (service SAS and user-delegation SAS).
+- **Azure.Communication.Email** — send an email (async) and poll it to a terminal
+  delivery status.
+
+The core is the deliverable as much as the services are: it owns credential
+resolution, per-scope token caching and refresh, request signing, retry,
+structured errors, and trace-level signing diagnostics — so a fourth service is a
+request type and an instance, not a rebuild. Licensed under the MIT license.
 
 ## Development
 
@@ -13,10 +22,15 @@ nix develop -c cabal build
 nix develop -c cabal test
 ```
 
+The test suite needs no cloud account: signing is checked against Microsoft's
+published golden vectors, blob round-trips run against the Azurite emulator, and
+the request/retry/email flows run against in-process stub servers.
+
 ## An environment
 
-The HTTP `Manager` is always yours: that is how your proxy, TLS settings and
-connection pool reach the library.
+Every call takes an `Env`. The HTTP `Manager` is always yours — that is how your
+proxy, TLS settings and connection pool reach the library; the SDK never creates
+one internally.
 
 ```haskell
 import Azure.Core
@@ -32,9 +46,12 @@ main = do
   ...
 ```
 
-Credentials: `Entra` (a token source; `Azure.Identity` provides the standard ones),
-`AccountKey` (Shared Key: Azurite and local development) and `Sas`. Key-based
-credentials are never auto-discovered.
+The credential is the second argument to `newEnv`. It is an action, not a value,
+so a credential that must be fetched (an ambient Entra token) is resolved when the
+`Env` is built. The kinds are `Entra` (a token source; `Azure.Identity` provides
+the standard ones), `AccountKey` (Shared Key, for Azurite and local development)
+and `Sas`. Key-based credentials are never auto-discovered — you pass them in
+explicitly.
 
 ## Calling Azure
 
@@ -55,24 +72,23 @@ instance AzureRequest GetThing where
 
 Signing, token caching (per scope, refreshed 5 minutes early, one fetch under
 concurrency), retry (429 with Retry-After, 500/502/503/504, connection failures),
-hooks and logging are handled by `send`. This example is compiled and run by
+hooks and logging are all handled by `send`. This example is compiled and run by
 `test/CoreSpec.hs`.
 
-Because `send`/`trySend` run in `ResourceT`, the HTTP connection is tied to
-that scope: a successful call may return a result that holds the response
-body lazily, so the connection is not released back to the pool until the
-enclosing `runResourceT` completes. A loop that makes many calls under one
-scope (e.g. pagination) and wants each connection returned promptly should
-wrap each call in its own `runResourceT`, or fully force the result before
-continuing.
+Because `send`/`trySend` run in `ResourceT`, the HTTP connection is tied to that
+scope: a successful call may return a result that holds the response body lazily,
+so the connection is not released back to the pool until the enclosing
+`runResourceT` completes. A loop that makes many calls under one scope (e.g.
+pagination) and wants each connection returned promptly should wrap each call in
+its own `runResourceT`, or fully force the result before continuing.
 
 ## Azure.Identity
 
 `discover` resolves an ambient Entra credential from the environment, in order:
 `AZURE_CLIENT_SECRET`, then `AZURE_CLIENT_CERTIFICATE_PATH`, then
-`AZURE_FEDERATED_TOKEN_FILE`, then IMDS (managed identity). Options 1–3 also
-need `AZURE_TENANT_ID` and `AZURE_CLIENT_ID`; a trigger set without its
-companions is an error, not a silent fall-through.
+`AZURE_FEDERATED_TOKEN_FILE`, then IMDS (managed identity). Options 1–3 also need
+`AZURE_TENANT_ID` and `AZURE_CLIENT_ID`; a trigger set without its companions is
+an error, not a silent fall-through.
 
 ```haskell
 import Azure.Core
@@ -97,8 +113,8 @@ Explicit credentials that are never auto-discovered:
 
 ## Azure.Storage.Blob
 
-Bind an `Env` to a blob endpoint with `blobService`, then reach for the
-ergonomic helpers:
+Bind an `Env` to a blob endpoint with `blobService`, then reach for the ergonomic
+helpers:
 
 ```haskell
 import Azure.Core
@@ -118,17 +134,17 @@ main = do
   pure ()
 ```
 
-`blobService :: Env -> BlobEndpoint -> BlobService` is the only place an
-`Env` and an endpoint meet; every helper afterwards just takes the
-`BlobService`, a `Container` and a `BlobName`. `listBlobNames` pages through
-`ListBlobs`, following the response's `NextMarker` to exhaustion, so it can
-make several requests for a large container. `blobExists` calls
-`GetBlobProperties` and folds a 404 response into `False`; any other error
+`blobService :: Env -> BlobEndpoint -> BlobService` is the only place an `Env` and
+an endpoint meet; every helper afterwards just takes the `BlobService`, a
+`Container` and a `BlobName`. `listBlobNames` pages through `ListBlobs`, following
+the response's `NextMarker` to exhaustion, so it can make several requests for a
+large container (`listBlobNamesPaged` exposes one page at a time). `blobExists`
+calls `GetBlobProperties` and folds a 404 response into `False`; any other error
 (auth failure, 5xx, a network problem) is rethrown.
 
 Against Azurite, swap in `emulatorEndpoint`/`azuriteDefault` (path-style: the
-account name lives in the URL path, not the host) and a Shared Key
-credential — `Azure.Identity` provides `fromAccountKey` for this:
+account name lives in the URL path, not the host) and a Shared Key credential —
+`Azure.Identity` provides `fromAccountKey` for this:
 
 ```haskell
 import Azure.Core
@@ -145,6 +161,28 @@ main = do
   ...
 ```
 
+### Time-limited read URLs (SAS)
+
+Both helpers return a URL that grants anonymous read of one blob until it expires,
+`ttl` seconds (a `NominalDiffTime`) from now. They differ only in how the URL is
+signed — which decides the credential the `BlobService` must carry:
+
+```haskell
+-- Entra path: a user-delegation SAS. Needs an Entra credential whose principal
+-- holds the Storage Blob Delegator role; a fresh delegation key is fetched per call.
+url <- userDelegationPresignedUrl bs (Container "images") (BlobName "logo.png") 3600
+
+-- Account-key path: a service SAS, signed with the account key. Needs an
+-- account-key (Shared Key) credential.
+url <- presignedUrl bs (Container "images") (BlobName "logo.png") 3600
+```
+
+Prefer `userDelegationPresignedUrl` wherever you already authenticate with Entra —
+it keeps long-lived account keys out of the signing path. `presignedUrl` requires
+an account-key credential and throws `AuthError` on an Entra credential (its
+message points you at the delegation helper). The URL's protocol follows the
+endpoint scheme: an `https` endpoint yields an HTTPS-only URL.
+
 ## Errors
 
 `ServiceError` carries the HTTP status, Azure's error code, the message and
@@ -154,7 +192,8 @@ main = do
 
 ## Azure.Communication.Email
 
-Queue an email for delivery (async) via `sendEmail_`, then optionally wait for delivery via `awaitEmail`:
+Queue an email for delivery (async) via `sendEmail_`, then optionally wait for
+delivery via `awaitEmail`:
 
 ```haskell
 import Azure.Core
@@ -178,12 +217,22 @@ main = do
   -- Send returns 202 (queued, not delivered)
   h <- sendEmail_ env msg
   putStrLn $ "Email queued: " ++ show (ohId h)
-  -- Optionally poll to terminal status (may block):
+  -- Optionally poll to a terminal status (may block):
   result <- awaitEmail env h
   putStrLn $ "Final status: " ++ show (esrStatus result)
 ```
 
-`acsEmailEndpoint "https://{resource}.communication.azure.com"` constructs the endpoint. `newSendEmail` creates the request, and fields like `seCc` can be added or changed via record update. `sendEmail_` returns a 202 — the email is *queued*, not delivered. `awaitEmail` polls the operation handle to a terminal status and may block; use it only if you need delivery confirmation.
+`acsEmailEndpoint` constructs the endpoint from the resource host. `newSendEmail`
+builds a minimal request (endpoint, sender, recipients, content); optional fields
+like `seCc`, `seBcc`, `seReplyTo` and `seAttachments` are set by record update.
+ACS accepts Entra bearer tokens, which is the path used here (the ACS HMAC key
+scheme is intentionally not implemented).
+
+A `202` from `sendEmail_` means the message is *queued, not delivered* — it
+returns an `OperationHandle`, not a confirmation. `awaitEmail` polls that handle to
+a terminal status (`Succeeded`/`Failed`/`Canceled`), honoring the service's
+`retry-after`, and may block for tens of seconds; use it only when you need
+delivery confirmation. `awaitEmailWithin` bounds the number of polls.
 
 ## Debugging a 403 AuthenticationFailed
 
@@ -196,4 +245,4 @@ computed signature:
 ```
 
 Secrets are redacted by the library at every level, including `Trace` and loggers
-you supply: account keys, client secrets, bearer tokens, SAS `sig=`.
+you supply: account keys, client secrets, bearer tokens, and SAS `sig=` values.
