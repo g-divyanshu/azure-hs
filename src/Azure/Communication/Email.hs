@@ -55,8 +55,8 @@ import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
-import Network.HTTP.Client (Request (..), RequestBody (..), method, parseRequest)
+import Data.Text.Encoding (decodeUtf8Lenient, encodeUtf8)
+import Network.HTTP.Client (Request (..), RequestBody (..), parseRequest)
 import Network.HTTP.Types (ResponseHeaders)
 import Text.Read (readMaybe)
 
@@ -201,7 +201,7 @@ sendResultHandle hdrs body = do
       Right
       (lookup "Operation-Location" hdrs)
   res <- either (Left . SerializeError) Right (parseEmailSendResult body)
-  Right (OperationHandle (decodeUtf8 loc) (esrId res) (esrStatus res))
+  Right (OperationHandle (decodeUtf8Lenient loc) (esrId res) (esrStatus res))
 
 instance AzureRequest SendEmail where
   type Rs SendEmail = OperationHandle
