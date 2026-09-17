@@ -2,7 +2,7 @@
 module EmailSpec (spec) where
 
 import Azure.Communication.Email
-import Azure.Core.Credential (communicationScope)
+import Azure.Core.Credential (AccessToken (..), Credential (..), TokenSource (..), communicationScope)
 import Azure.Core.Env (newEnv)
 import Azure.Core.Error (AzureError (..))
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..))
@@ -12,8 +12,12 @@ import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy.Char8 as LC
 import Data.Aeson (toJSON, object, (.=), Value)
 import Data.Proxy (Proxy (..))
+import Data.Time (addUTCTime, getCurrentTime)
+import qualified Data.Text as T
 import Network.HTTP.Client (method, path, queryString, requestHeaders)
 import Network.HTTP.Client.TLS (newTlsManager)
+import Network.HTTP.Types (status200, status202)
+import StubServer (Recorded (..), withStub')
 import Test.Hspec
 
 spec :: Spec
@@ -114,3 +118,27 @@ spec = describe "Azure.Communication.Email" $ do
       case sendResultHandle [] (LC.pack "{\"id\":\"opid\",\"status\":\"Running\"}") of
         Left (SerializeError _) -> True `shouldBe` True
         _ -> expectationFailure "expected SerializeError for missing Operation-Location"
+
+  describe "sendEmail_ + awaitEmail (stub server)" $
+    it "sends (202 -> handle), then polls Running->Succeeded and returns the terminal result" $ do
+      mgr <- newTlsManager
+      now <- getCurrentTime
+      let src = TokenSource "fake" (\_ _ -> pure (AccessToken "fake-token" (addUTCTime 3600 now)))
+      env <- newEnv mgr (pure (Entra src))
+      withStub'
+        (\base ->
+           [ (status202, [("Operation-Location", BC.pack (T.unpack base ++ "/emails/operations/opid?api-version=2025-09-01"))], LC.pack "{\"id\":\"opid\",\"status\":\"Running\"}")
+           , (status200, [("retry-after", "0")], LC.pack "{\"id\":\"opid\",\"status\":\"Running\"}")
+           , (status200, [], LC.pack "{\"id\":\"opid\",\"status\":\"Succeeded\"}")
+           ])
+        $ \base recorded -> do
+          let ep = acsEmailEndpoint base
+          handle <- sendEmail_ env (newSendEmail ep "s@x.com" [mkAddress "to@x.com"] (EmailContent "S" (Just "b") Nothing))
+          ohId handle `shouldBe` "opid"
+          result <- awaitEmail env handle
+          esrStatus result `shouldBe` Succeeded
+          rs <- recorded
+          -- first request is the POST send; subsequent are GET polls; all bearer-authed.
+          recMethod (head rs) `shouldBe` "POST"
+          BC.unpack (recPath (head rs)) `shouldContain` "emails:send"
+          all (\r -> lookup "Authorization" (recHeaders r) == Just "Bearer fake-token") rs `shouldBe` True

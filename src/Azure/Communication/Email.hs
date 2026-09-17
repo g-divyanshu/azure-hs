@@ -32,11 +32,21 @@ module Azure.Communication.Email
   , sendResultHandle
   , EmailPoll (..)
   , GetSendResult (..)
+    -- * Send & await
+  , sendEmail_
+  , awaitEmail
+  , awaitEmailWithin
+  , defaultMaxPolls
+  , defaultPollSec
   ) where
 
 import Azure.Core.Credential (communicationScope)
+import Azure.Core.Env (Env)
 import Azure.Core.Error (AzureError (..))
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest, readBody)
+import Azure.Core.Send (send)
+import Control.Concurrent (threadDelay)
+import Control.Monad.Trans.Resource (runResourceT)
 import Data.Aeson (FromJSON (..), ToJSON (..), Value (String), eitherDecode, encode, object, withObject, withText, (.:), (.:?), (.=))
 import Data.Aeson.Types (Pair)
 import qualified Data.Aeson.Key as Key
@@ -232,3 +242,36 @@ instance AzureRequest GetSendResult where
     pure $ case parseEmailSendResult body of
       Left e -> Left (SerializeError e)
       Right res -> Right (EmailPoll res (lookup "retry-after" hdrs >>= readMaybe . C.unpack))
+
+-- | Poll budget for 'awaitEmail': how many times 'awaitEmailWithin' will
+-- poll before giving up and returning the last-observed (non-terminal)
+-- result.
+defaultMaxPolls :: Int
+defaultMaxPolls = 60
+
+-- | Fallback delay (seconds) between polls when the service's response
+-- carries no @retry-after@ header.
+defaultPollSec :: Int
+defaultPollSec = 2
+
+-- | Queue an email. Returns the operation handle from the 202 — fire-and-forget.
+sendEmail_ :: Env -> SendEmail -> IO OperationHandle
+sendEmail_ env se = runResourceT (send env se)
+
+-- | Poll delivery to a terminal status (or until the poll budget is spent),
+-- honoring the service's @retry-after@. May block for a while — opt-in.
+awaitEmail :: Env -> OperationHandle -> IO EmailSendResult
+awaitEmail = awaitEmailWithin defaultMaxPolls
+
+-- | Like 'awaitEmail', but with an explicit poll budget instead of
+-- 'defaultMaxPolls'.
+awaitEmailWithin :: Int -> Env -> OperationHandle -> IO EmailSendResult
+awaitEmailWithin maxPolls env oh = go maxPolls
+  where
+    go n = do
+      EmailPoll res retryAfter <- runResourceT (send env (GetSendResult (ohUrl oh)))
+      if isTerminal (esrStatus res) || n <= 1
+        then pure res
+        else do
+          threadDelay (maybe defaultPollSec id retryAfter * 1000000)
+          go (n - 1)
