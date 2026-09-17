@@ -16,8 +16,19 @@ module Azure.Communication.Email
     -- * Status
   , EmailSendStatus (..)
   , isTerminal
+    -- * Request types
+  , EmailAddress (..)
+  , mkAddress
+  , mkAddressNamed
+  , Attachment (..)
+  , EmailContent (..)
+  , SendEmail (..)
+  , newSendEmail
   ) where
 
+import Data.Aeson (ToJSON (..), Value (String), object, (.=))
+import Data.Aeson.Types (Pair)
+import qualified Data.Aeson.Key as Key
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -44,3 +55,77 @@ data EmailSendStatus = NotStarted | Running | Succeeded | Failed | Canceled
 -- | Whether a status is a terminal state (no further polling needed).
 isTerminal :: EmailSendStatus -> Bool
 isTerminal s = s `elem` [Succeeded, Failed, Canceled]
+
+-- | Email recipient with optional display name.
+data EmailAddress = EmailAddress {eaAddress :: Text, eaDisplayName :: Maybe Text}
+  deriving stock (Eq, Show)
+
+mkAddress :: Text -> EmailAddress
+mkAddress a = EmailAddress a Nothing
+
+mkAddressNamed :: Text -> Text -> EmailAddress
+mkAddressNamed a n = EmailAddress a (Just n)
+
+instance ToJSON EmailAddress where
+  toJSON a = object (("address" .= eaAddress a) : optField "displayName" (eaDisplayName a))
+
+-- | Email attachment with optional content ID.
+data Attachment = Attachment
+  { atName :: Text, atContentType :: Text, atContentBase64 :: Text, atContentId :: Maybe Text }
+  deriving stock (Eq, Show)
+
+instance ToJSON Attachment where
+  toJSON a =
+    object $
+      [ "name" .= atName a, "contentType" .= atContentType a, "contentInBase64" .= atContentBase64 a ]
+        <> optField "contentId" (atContentId a)
+
+-- | Email message content with optional plain text and HTML.
+data EmailContent = EmailContent {ecSubject :: Text, ecPlainText :: Maybe Text, ecHtml :: Maybe Text}
+  deriving stock (Eq, Show)
+
+instance ToJSON EmailContent where
+  toJSON c = object $ ["subject" .= ecSubject c] <> optField "plainText" (ecPlainText c) <> optField "html" (ecHtml c)
+
+-- | Complete send-email request (endpoint and operationId are request-level, not in body).
+data SendEmail = SendEmail
+  { seEndpoint :: EmailEndpoint
+  , seSenderAddress :: Text
+  , seContent :: EmailContent
+  , seTo :: [EmailAddress]
+  , seCc :: [EmailAddress]
+  , seBcc :: [EmailAddress]
+  , seReplyTo :: [EmailAddress]
+  , seAttachments :: [Attachment]
+  , seHeaders :: [(Text, Text)]
+  , seUserEngagementTrackingDisabled :: Maybe Bool
+  , seOperationId :: Maybe Text
+  }
+
+newSendEmail :: EmailEndpoint -> Text -> [EmailAddress] -> EmailContent -> SendEmail
+newSendEmail ep sender to content =
+  SendEmail ep sender content to [] [] [] [] [] Nothing Nothing
+
+-- | Emits the EmailMessage request body (endpoint and operationId are request-level, not body).
+instance ToJSON SendEmail where
+  toJSON se =
+    object $
+      [ "senderAddress" .= seSenderAddress se
+      , "content" .= seContent se
+      , "recipients" .= object (["to" .= seTo se] <> optArr "cc" (seCc se) <> optArr "bcc" (seBcc se))
+      ]
+        <> optArr "replyTo" (seReplyTo se)
+        <> optArr "attachments" (seAttachments se)
+        <> optHeaders (seHeaders se)
+        <> maybe [] (\b -> ["userEngagementTrackingDisabled" .= b]) (seUserEngagementTrackingDisabled se)
+
+optField :: ToJSON a => Key.Key -> Maybe a -> [Pair]
+optField k = maybe [] (\v -> [k .= v])
+
+optArr :: ToJSON a => Key.Key -> [a] -> [Pair]
+optArr _ [] = []
+optArr k xs = [k .= xs]
+
+optHeaders :: [(Text, Text)] -> [Pair]
+optHeaders [] = []
+optHeaders hs = ["headers" .= object [Key.fromText k .= String v | (k, v) <- hs]]
