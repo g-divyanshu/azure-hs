@@ -30,6 +30,8 @@ module Azure.Communication.Email
   , parseEmailSendResult
   , OperationHandle (..)
   , sendResultHandle
+  , EmailPoll (..)
+  , GetSendResult (..)
   ) where
 
 import Azure.Core.Credential (communicationScope)
@@ -39,12 +41,14 @@ import Data.Aeson (FromJSON (..), ToJSON (..), Value (String), eitherDecode, enc
 import Data.Aeson.Types (Pair)
 import qualified Data.Aeson.Key as Key
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
-import Network.HTTP.Client (Request (..), RequestBody (..))
+import Network.HTTP.Client (Request (..), RequestBody (..), method, parseRequest)
 import Network.HTTP.Types (ResponseHeaders)
+import Text.Read (readMaybe)
 
 newtype EmailEndpoint = EmailEndpoint Text deriving stock (Eq, Show)
 
@@ -207,3 +211,24 @@ instance AzureRequest SendEmail where
               <> requestHeaders r
         }
   fromResponse _ _ hdrs br = sendResultHandle hdrs <$> readBody br
+
+-- | Poll result: the operation's current state and optional retry-after guidance.
+data EmailPoll = EmailPoll {epResult :: EmailSendResult, epRetryAfterSec :: Maybe Int}
+  deriving stock (Eq, Show)
+
+-- | Poll one operation status. @gsrUrl@ is the absolute Operation-Location URL
+-- returned by 'SendEmail' (it already carries @api-version@).
+newtype GetSendResult = GetSendResult {gsrUrl :: Text}
+
+instance AzureRequest GetSendResult where
+  type Rs GetSendResult = EmailPoll
+  authFor _ = BearerAuth communicationScope
+  -- parseRequest (not mkRequest) so the URL's existing api-version query survives.
+  toRequest _ g = do
+    r <- parseRequest (T.unpack (gsrUrl g))
+    pure r {method = "GET"}
+  fromResponse _ _ hdrs br = do
+    body <- readBody br
+    pure $ case parseEmailSendResult body of
+      Left e -> Left (SerializeError e)
+      Right res -> Right (EmailPoll res (lookup "retry-after" hdrs >>= readMaybe . C.unpack))

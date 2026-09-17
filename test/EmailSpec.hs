@@ -76,6 +76,32 @@ spec = describe "Azure.Communication.Email" $ do
       lookup "Content-Type" (requestHeaders r) `shouldBe` Just "application/json"
       authFor (Proxy :: Proxy SendEmail) `shouldBe` BearerAuth communicationScope
 
+  describe "parseEmailSendResult (Microsoft sample payloads)" $ do
+    it "parses a Running status" $
+      fmap esrStatus (parseEmailSendResult (LC.pack "{\"id\":\"F9168C5E\",\"status\":\"Running\"}"))
+        `shouldBe` Right Running
+    it "parses a Succeeded status with no error" $
+      parseEmailSendResult (LC.pack "{\"id\":\"F9168C5E\",\"status\":\"Succeeded\"}")
+        `shouldBe` Right (EmailSendResult "F9168C5E" Succeeded Nothing)
+    it "parses a Failed status carrying the error code and message" $
+      parseEmailSendResult (LC.pack "{\"id\":\"F9\",\"status\":\"Failed\",\"error\":{\"code\":\"EmailDropped\",\"message\":\"Email was dropped after several attempts to deliver.\"}}")
+        `shouldBe` Right (EmailSendResult "F9" Failed (Just (EmailError "EmailDropped" "Email was dropped after several attempts to deliver.")))
+    it "rejects an unknown status value" $
+      case parseEmailSendResult (LC.pack "{\"id\":\"x\",\"status\":\"Bogus\"}") of
+        Left _ -> True `shouldBe` True
+        Right _ -> expectationFailure "expected a parse failure for an unknown status"
+
+  describe "GetSendResult toRequest" $
+    it "GETs the operation URL verbatim, preserving its api-version query, with bearer auth" $ do
+      mgr <- newTlsManager
+      key <- either (fail . show) pure (mkAccountKey "Zm9vYmFy")
+      env <- newEnv mgr (pure (fromAccountKey (AccountName "x") key))
+      r <- toRequest env (GetSendResult "https://r.communication.azure.com/emails/operations/opid?api-version=2025-09-01")
+      method r `shouldBe` "GET"
+      path r `shouldBe` "/emails/operations/opid"
+      BC.unpack (queryString r) `shouldContain` "api-version=2025-09-01"
+      authFor (Proxy :: Proxy GetSendResult) `shouldBe` BearerAuth communicationScope
+
   describe "sendResultHandle" $ do
     it "builds an OperationHandle from the Operation-Location header and the 202 body" $
       case sendResultHandle
