@@ -21,10 +21,16 @@ module Azure.Core.SAS
     -- * Service SAS (account-key signed)
   , serviceSasStringToSign
   , serviceSas
+    -- * User Delegation SAS
+  , UserDelegationKey (..)
+  , mkUserDelegationKey
+  , userDelegationSasStringToSign
+  , userDelegationSas
   ) where
 
-import Azure.Core.Signing (AccountKey, AccountName (..), signWithAccountKey)
+import Azure.Core.Signing (AccountKey, AccountName (..), hmacSha256Base64, signWithAccountKey)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Base64 as B64
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -159,5 +165,86 @@ serviceSas acct key spec = decodeUtf8 (renderSimpleQuery False params)
         <> opt "sip" (sasIP spec)
         <> [("spr", encodeUtf8 (sasProtocolValue (sasProtocol spec)))]
         <> opt "si" (sasIdentifier spec)
+        <> opt "ses" (sasEncryptionScope spec)
+        <> [("sig", sig)]
+
+-- | The parsed 'Get User Delegation Key' response. The six text fields are
+-- echoed verbatim into the SAS (@skoid sktid skt ske sks skv@); 'udkKeyBytes'
+-- is the base64-decoded @Value@, used as the HMAC key.
+data UserDelegationKey = UserDelegationKey
+  { udkObjectId :: Text
+  , udkTenantId :: Text
+  , udkStart :: Text
+  , udkExpiry :: Text
+  , udkService :: Text
+  , udkVersion :: Text
+  , udkKeyBytes :: ByteString
+  }
+
+-- | Build a 'UserDelegationKey', base64-decoding the key @Value@.
+mkUserDelegationKey :: Text -> Text -> Text -> Text -> Text -> Text -> Text -> Either Text UserDelegationKey
+mkUserDelegationKey skoid sktid skt ske sks skv value =
+  case B64.decode (encodeUtf8 (T.strip value)) of
+    Left e -> Left ("user delegation key Value is not valid base64: " <> T.pack e)
+    Right bs -> Right (UserDelegationKey skoid sktid skt ske sks skv bs)
+
+-- | The user-delegation-SAS string-to-sign for 'sasSignedVersion' (2020-12-06):
+-- 24 positional, newline-separated fields for a blob resource. Differs from the
+-- service-SAS layout by the six user-delegation key fields (skoid..skv) plus the
+-- empty saoid/suoid/scid fields after the canonical resource.
+userDelegationSasStringToSign :: AccountName -> UserDelegationKey -> SasSpec -> ByteString
+userDelegationSasStringToSign acct key spec = encodeUtf8 (T.intercalate "\n" fields)
+  where
+    fields =
+      [ renderPermissions (sasPermissions spec) -- signedPermissions
+      , maybe "" sasTime (sasStart spec) -- signedStart
+      , sasTime (sasExpiry spec) -- signedExpiry
+      , canonicalizedSasResource acct spec -- canonicalizedResource
+      , udkObjectId key -- signedKeyObjectId (skoid)
+      , udkTenantId key -- signedKeyTenantId (sktid)
+      , udkStart key -- signedKeyStart (skt)
+      , udkExpiry key -- signedKeyExpiry (ske)
+      , udkService key -- signedKeyService (sks)
+      , udkVersion key -- signedKeyVersion (skv)
+      , "" -- signedAuthorizedUserObjectId (saoid)
+      , "" -- signedUnauthorizedUserObjectId (suoid)
+      , "" -- signedCorrelationId (scid)
+      , fromMaybe "" (sasIP spec) -- signedIP
+      , sasProtocolValue (sasProtocol spec) -- signedProtocol
+      , decodeUtf8 sasSignedVersion -- signedVersion (sv)
+      , sasResourceCode (sasResource spec) -- signedResource (sr)
+      , "" -- signedSnapshotTime
+      , fromMaybe "" (sasEncryptionScope spec) -- signedEncryptionScope (ses)
+      , "" -- rscc
+      , "" -- rscd
+      , "" -- rsce
+      , "" -- rscl
+      , "" -- rsct
+      ]
+
+-- | Sign @spec@ with the user delegation @key@ and return the SAS token: the
+-- query string (no leading @?@), every value URL-encoded. Includes the six
+-- @sk*@ delegation-key parameters that the service needs to re-derive the key.
+userDelegationSas :: AccountName -> UserDelegationKey -> SasSpec -> Text
+userDelegationSas acct key spec = decodeUtf8 (renderSimpleQuery False params)
+  where
+    sig = hmacSha256Base64 (udkKeyBytes key) (userDelegationSasStringToSign acct key spec)
+    opt name = maybe [] (\v -> [(name, encodeUtf8 v)])
+    params =
+      [ ("sv", sasSignedVersion)
+      , ("sr", encodeUtf8 (sasResourceCode (sasResource spec)))
+      , ("sp", encodeUtf8 (renderPermissions (sasPermissions spec)))
+      ]
+        <> opt "st" (sasTime <$> sasStart spec)
+        <> [("se", encodeUtf8 (sasTime (sasExpiry spec)))]
+        <> opt "sip" (sasIP spec)
+        <> [("spr", encodeUtf8 (sasProtocolValue (sasProtocol spec)))]
+        <> [ ("skoid", encodeUtf8 (udkObjectId key))
+           , ("sktid", encodeUtf8 (udkTenantId key))
+           , ("skt", encodeUtf8 (udkStart key))
+           , ("ske", encodeUtf8 (udkExpiry key))
+           , ("sks", encodeUtf8 (udkService key))
+           , ("skv", encodeUtf8 (udkVersion key))
+           ]
         <> opt "ses" (sasEncryptionScope spec)
         <> [("sig", sig)]

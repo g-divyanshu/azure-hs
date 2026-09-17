@@ -3,6 +3,7 @@
 
 module BlobSpec (spec) where
 
+import Azure.Core.Credential (AccessToken (..), Credential (..), TokenSource (..), storageScope)
 import Azure.Core.Env (newEnv)
 import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest)
 import Azure.Core.Send (send)
@@ -17,6 +18,7 @@ import Azure.Storage.Blob
   , Container (..)
   , GetBlob (..)
   , GetBlobProperties (..)
+  , GetUserDelegationKey (..)
   , ListBlobs (..)
   , blobResourceUrl
   , blobService
@@ -27,19 +29,27 @@ import Azure.Storage.Blob
   , newPutBlob
   , parseBlobList
   , parseBlobProperties
+  , parseUserDelegationKey
   , presignedUrl
   , productionEndpoint
   , putBlob_
+  , userDelegationPresignedUrl
   )
+import Azure.Core.SAS (UserDelegationKey (..))
 import Azurite (azuriteAccount, azuriteKey, withAzurite)
 import Control.Monad (forM_)
 import Control.Monad.Trans.Resource (runResourceT)
+import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy.Char8 as LC
+import Data.Proxy (Proxy (..))
 import qualified Data.Text as T
+import Data.Time (addUTCTime, getCurrentTime)
 import Network.HTTP.Client (RequestBody (..), httpLbs, method, parseRequest, path, queryString, requestHeaders, responseBody, responseStatus)
 import Network.HTTP.Client.TLS (newTlsManager)
-import Network.HTTP.Types (statusCode)
+import Network.HTTP.Types (status200, statusCode)
+import Network.HTTP.Types.URI (parseSimpleQuery)
+import StubServer (Recorded (..), withStub)
 import Test.Hspec
 
 -- | Test-only: @PUT {container}?restype=container@. Container creation is
@@ -137,6 +147,59 @@ spec = describe "Azure.Storage.Blob" $ do
       q `shouldContain` "comp=list"
       q `shouldContain` "prefix=logs"
       q `shouldContain` "maxresults=2"
+  describe "parseUserDelegationKey" $
+    it "reads all six signed fields and the Value" $ do
+      let xml = LC.pack udkXml
+          expectedKeyBytes =
+            either (error . show) id
+              (B64.decode "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==")
+      case parseUserDelegationKey xml of
+        Left e -> expectationFailure (T.unpack e)
+        Right k -> do
+          udkObjectId k `shouldBe` "11111111-1111-1111-1111-111111111111"
+          udkTenantId k `shouldBe` "22222222-2222-2222-2222-222222222222"
+          udkStart k `shouldBe` "2024-01-01T00:00:00Z"
+          udkExpiry k `shouldBe` "2024-01-08T00:00:00Z"
+          udkService k `shouldBe` "b"
+          udkVersion k `shouldBe` "2020-12-06"
+          udkKeyBytes k `shouldBe` expectedKeyBytes
+  describe "GetUserDelegationKey toRequest" $
+    it "POSTs to /?restype=service&comp=userdelegationkey with a KeyInfo body and bearer auth" $ do
+      env <- dummyEnv
+      r <- toRequest env (GetUserDelegationKey ep "2024-01-01T00:00:00Z" "2024-01-02T00:00:00Z")
+      method r `shouldBe` "POST"
+      path r `shouldBe` "/devstoreaccount1/"
+      let q = BC.unpack (queryString r)
+      q `shouldContain` "restype=service"
+      q `shouldContain` "comp=userdelegationkey"
+      authFor (Proxy :: Proxy GetUserDelegationKey) `shouldBe` BearerAuth storageScope
+  describe "GetUserDelegationKey (stub server)" $
+    it "sends a bearer POST and parses the returned key" $
+      withStub [(status200, [], LC.pack udkXml)] $ \base recorded -> do
+        mgr <- newTlsManager
+        now <- getCurrentTime
+        let src = TokenSource "fake" $ \_ _ -> pure (AccessToken "fake-token" (addUTCTime 3600 now))
+        env <- newEnv mgr (pure (Entra src))
+        let ep' = emulatorEndpoint base (AccountName "devstoreaccount1")
+        k <- runResourceT (send env (GetUserDelegationKey ep' "2024-01-01T00:00:00Z" "2024-01-08T00:00:00Z"))
+        udkService k `shouldBe` "b"
+        [rec] <- recorded
+        recMethod rec `shouldBe` "POST"
+        lookup "Authorization" (recHeaders rec) `shouldBe` Just "Bearer fake-token"
+        lookup "x-ms-version" (recHeaders rec) `shouldBe` Just "2020-12-06"
+        recBody rec `shouldSatisfy` (\b -> BC.pack "KeyInfo" `BC.isInfixOf` LC.toStrict b)
+  describe "userDelegationPresignedUrl (stub server)" $
+    it "fetches a delegation key and returns a URL carrying a user-delegation SAS" $
+      withStub [(status200, [], LC.pack udkXml)] $ \base _recorded -> do
+        mgr <- newTlsManager
+        now <- getCurrentTime
+        let src = TokenSource "fake" $ \_ _ -> pure (AccessToken "fake-token" (addUTCTime 3600 now))
+        env <- newEnv mgr (pure (Entra src))
+        let bs = blobService env (emulatorEndpoint base (AccountName "devstoreaccount1"))
+        url <- userDelegationPresignedUrl bs (Container "c") (BlobName "b.txt") 300
+        let q = parseSimpleQuery (BC.pack (drop 1 (dropWhile (/= '?') (T.unpack url))))
+        lookup "skoid" q `shouldBe` Just "11111111-1111-1111-1111-111111111111"
+        lookup "sig" q `shouldSatisfy` maybe False (not . BC.null)
   describe "withAzurite" $
     it "starts an Azurite blob endpoint that answers HTTP" $
       withAzurite $ \base -> do
@@ -219,3 +282,16 @@ listXmlNoMarker =
 listXmlEmpty :: String
 listXmlEmpty =
   "<?xml version=\"1.0\"?><EnumerationResults><Blobs/></EnumerationResults>"
+
+udkXml :: String
+udkXml =
+  "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+  \<UserDelegationKey>\
+  \<SignedOid>11111111-1111-1111-1111-111111111111</SignedOid>\
+  \<SignedTid>22222222-2222-2222-2222-222222222222</SignedTid>\
+  \<SignedStart>2024-01-01T00:00:00Z</SignedStart>\
+  \<SignedExpiry>2024-01-08T00:00:00Z</SignedExpiry>\
+  \<SignedService>b</SignedService>\
+  \<SignedVersion>2020-12-06</SignedVersion>\
+  \<Value>Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==</Value>\
+  \</UserDelegationKey>"

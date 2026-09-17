@@ -23,6 +23,18 @@ acct = AccountName "myaccount"
 expiry :: UTCTime
 expiry = UTCTime (fromGregorian 2025 1 1) 0
 
+udk :: UserDelegationKey
+udk =
+  either (error . T.unpack) id $
+    mkUserDelegationKey
+      "00000000-0000-0000-0000-000000000001"   -- skoid
+      "00000000-0000-0000-0000-000000000002"   -- sktid
+      "2024-12-31T00:00:00Z"                    -- skt
+      "2025-01-07T00:00:00Z"                    -- ske
+      "b"                                       -- sks
+      "2021-08-06"                              -- skv
+      "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+
 spec :: Spec
 spec = do
   describe "serviceSasStringToSign: read-only blob SAS at sv=2020-12-06" $ do
@@ -91,3 +103,45 @@ spec = do
       lookup "st" q `shouldBe` Just "2024-12-31T00:00:00Z"
       lookup "sip" q `shouldBe` Just "198.51.100.10"
       lookup "ses" q `shouldBe` Just "myscope"
+
+  describe "mkUserDelegationKey" $ do
+    it "accepts a valid base64 Value" $
+      either (const False) (const True)
+        (mkUserDelegationKey "oid" "tid" "s" "e" "b" "2020-12-06"
+           "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==")
+        `shouldBe` True
+    it "rejects a Value that is not base64" $
+      either (const True) (const False)
+        (mkUserDelegationKey "oid" "tid" "s" "e" "b" "2020-12-06" "not base64!!")
+        `shouldBe` True
+
+  describe "userDelegationSasStringToSign: read-only blob SAS at sv=2020-12-06" $ do
+    let s = newBlobReadSpec "mycontainer" "myblob.txt" expiry
+    it "lays out the 24 documented fields in order, byte-for-byte" $
+      userDelegationSasStringToSign acct udk s
+        `shouldBe` "r\n\n2025-01-01T00:00:00Z\n/blob/myaccount/mycontainer/myblob.txt\n00000000-0000-0000-0000-000000000001\n00000000-0000-0000-0000-000000000002\n2024-12-31T00:00:00Z\n2025-01-07T00:00:00Z\nb\n2021-08-06\n\n\n\n\nhttps\n2020-12-06\nb\n\n\n\n\n\n\n"
+    it "places the key object id in field 5 and the key version in field 10" $ do
+      let f = C.split '\n' (userDelegationSasStringToSign acct udk s)
+      (f !! 4) `shouldBe` "00000000-0000-0000-0000-000000000001"
+      (f !! 9) `shouldBe` "2021-08-06"
+      (f !! 15) `shouldBe` "2020-12-06"
+
+  describe "userDelegationSas: the assembled token" $ do
+    let s = newBlobReadSpec "mycontainer" "myblob.txt" expiry
+        q = parseSimpleQuery (C.pack (T.unpack (userDelegationSas acct udk s)))
+    it "signs with the delegation key: matches the independent reference signature" $
+      lookup "sig" q `shouldBe` Just "/Lm+KirVmhvCTzmhmqdlIPi4gypPkQKmyDDbKlaYU4Q="
+    it "carries the six user-delegation key parameters" $ do
+      lookup "skoid" q `shouldBe` Just "00000000-0000-0000-0000-000000000001"
+      lookup "sktid" q `shouldBe` Just "00000000-0000-0000-0000-000000000002"
+      lookup "skt" q `shouldBe` Just "2024-12-31T00:00:00Z"
+      lookup "ske" q `shouldBe` Just "2025-01-07T00:00:00Z"
+      lookup "sks" q `shouldBe` Just "b"
+      lookup "skv" q `shouldBe` Just "2021-08-06"
+    it "still carries sv, sr, sp, se, spr and sig, and no account-key artifacts" $ do
+      lookup "sv" q `shouldBe` Just "2020-12-06"
+      lookup "sr" q `shouldBe` Just "b"
+      lookup "sp" q `shouldBe` Just "r"
+      lookup "se" q `shouldBe` Just "2025-01-01T00:00:00Z"
+      lookup "spr" q `shouldBe` Just "https"
+      lookup "si" q `shouldBe` Nothing

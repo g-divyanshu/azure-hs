@@ -2,6 +2,7 @@ module SigningSpec (spec) where
 
 import Azure.Core.Hooks (SigningScheme (..), SigningTrace (..))
 import Azure.Core.Signing
+import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as C
 import Data.Time (UTCTime (..), fromGregorian)
 import Network.HTTP.Client
@@ -110,3 +111,9 @@ spec = do
     it "formats x-ms-date the way Azure expects" $
       rfc1123Date (UTCTime (fromGregorian 2015 6 26) (23 * 3600 + 39 * 60 + 12))
         `shouldBe` "Fri, 26 Jun 2015 23:39:12 GMT"
+
+  describe "hmacSha256Base64" $
+    it "is the primitive under signWithAccountKey: same key bytes, same result" $ do
+      let keyBytes = either (error . show) id (B64.decode "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==")
+      hmacSha256Base64 keyBytes "GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:Fri, 26 Jun 2015 23:39:12 GMT\nx-ms-version:2015-02-21\n/myaccount/mycontainer\ncomp:metadata\nrestype:container\ntimeout:20"
+        `shouldBe` "1u9lui2jDxj0+fpbHjQ5m5NnastJRSYM+PSmfi8TXx4="
