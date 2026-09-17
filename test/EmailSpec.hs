@@ -2,7 +2,18 @@
 module EmailSpec (spec) where
 
 import Azure.Communication.Email
+import Azure.Core.Credential (communicationScope)
+import Azure.Core.Env (newEnv)
+import Azure.Core.Error (AzureError (..))
+import Azure.Core.Request (AuthRequirement (..), AzureRequest (..))
+import Azure.Core.Signing (AccountName (..), mkAccountKey)
+import Azure.Identity (fromAccountKey)
+import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Lazy.Char8 as LC
 import Data.Aeson (toJSON, object, (.=), Value)
+import Data.Proxy (Proxy (..))
+import Network.HTTP.Client (method, path, queryString, requestHeaders)
+import Network.HTTP.Client.TLS (newTlsManager)
 import Test.Hspec
 
 spec :: Spec
@@ -52,3 +63,28 @@ spec = describe "Azure.Communication.Email" $ do
           , "content" .= object ["subject" .= ("S" :: Value), "plainText" .= ("b" :: Value)]
           , "recipients" .= object ["to" .= [ object ["address" .= ("to@x.com" :: Value)] ]]
           ]
+  describe "SendEmail toRequest" $
+    it "POSTs to /emails:send with the pinned api-version, JSON content-type, and bearer auth" $ do
+      mgr <- newTlsManager
+      key <- either (fail . show) pure (mkAccountKey "Zm9vYmFy")
+      env <- newEnv mgr (pure (fromAccountKey (AccountName "x") key))
+      let ep = acsEmailEndpoint "https://r.communication.azure.com"
+      r <- toRequest env (newSendEmail ep "s@x.com" [mkAddress "to@x.com"] (EmailContent "S" (Just "b") Nothing))
+      method r `shouldBe` "POST"
+      path r `shouldBe` "/emails:send"
+      BC.unpack (queryString r) `shouldContain` "api-version=2025-09-01"
+      lookup "Content-Type" (requestHeaders r) `shouldBe` Just "application/json"
+      authFor (Proxy :: Proxy SendEmail) `shouldBe` BearerAuth communicationScope
+
+  describe "sendResultHandle" $ do
+    it "builds an OperationHandle from the Operation-Location header and the 202 body" $
+      case sendResultHandle
+             [("Operation-Location", "https://r.communication.azure.com/emails/operations/opid?api-version=2025-09-01")]
+             (LC.pack "{\"id\":\"opid\",\"status\":\"Running\"}") of
+        Right oh ->
+          oh `shouldBe` OperationHandle "https://r.communication.azure.com/emails/operations/opid?api-version=2025-09-01" "opid" Running
+        Left e -> expectationFailure ("expected Right, got Left: " <> show e)
+    it "fails with SerializeError when Operation-Location is absent" $
+      case sendResultHandle [] (LC.pack "{\"id\":\"opid\",\"status\":\"Running\"}") of
+        Left (SerializeError _) -> True `shouldBe` True
+        _ -> expectationFailure "expected SerializeError for missing Operation-Location"

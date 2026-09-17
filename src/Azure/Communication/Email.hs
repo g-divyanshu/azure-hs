@@ -24,14 +24,27 @@ module Azure.Communication.Email
   , EmailContent (..)
   , SendEmail (..)
   , newSendEmail
+    -- * Send result
+  , EmailError (..)
+  , EmailSendResult (..)
+  , parseEmailSendResult
+  , OperationHandle (..)
+  , sendResultHandle
   ) where
 
-import Data.Aeson (ToJSON (..), Value (String), object, (.=))
+import Azure.Core.Credential (communicationScope)
+import Azure.Core.Error (AzureError (..))
+import Azure.Core.Request (AuthRequirement (..), AzureRequest (..), mkRequest, readBody)
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (String), eitherDecode, encode, object, withObject, withText, (.:), (.:?), (.=))
 import Data.Aeson.Types (Pair)
 import qualified Data.Aeson.Key as Key
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Network.HTTP.Client (Request (..), RequestBody (..))
+import Network.HTTP.Types (ResponseHeaders)
 
 newtype EmailEndpoint = EmailEndpoint Text deriving stock (Eq, Show)
 
@@ -129,3 +142,68 @@ optArr k xs = [k .= xs]
 optHeaders :: [(Text, Text)] -> [Pair]
 optHeaders [] = []
 optHeaders hs = ["headers" .= object [Key.fromText k .= String v | (k, v) <- hs]]
+
+-- | Error detail carried by a failed 'EmailSendResult'.
+data EmailError = EmailError {eeCode :: Text, eeMessage :: Text} deriving stock (Eq, Show)
+
+-- | Body of the poll operation's response (@GET .../emails/operations/{id}@),
+-- and — recycled here — the 202 body returned by the initial send.
+data EmailSendResult = EmailSendResult
+  {esrId :: Text, esrStatus :: EmailSendStatus, esrError :: Maybe EmailError}
+  deriving stock (Eq, Show)
+
+instance FromJSON EmailSendStatus where
+  parseJSON = withText "EmailSendStatus" $ \t -> case t of
+    "NotStarted" -> pure NotStarted
+    "Running" -> pure Running
+    "Succeeded" -> pure Succeeded
+    "Failed" -> pure Failed
+    "Canceled" -> pure Canceled
+    _ -> fail ("unknown EmailSendStatus: " <> T.unpack t)
+
+instance FromJSON EmailError where
+  parseJSON = withObject "EmailError" $ \o -> EmailError <$> o .: "code" <*> o .: "message"
+
+instance FromJSON EmailSendResult where
+  parseJSON = withObject "EmailSendResult" $ \o ->
+    EmailSendResult <$> o .: "id" <*> o .: "status" <*> o .:? "error"
+
+-- | Parse a send/poll result body. Left carries the aeson decode error verbatim.
+parseEmailSendResult :: LBS.ByteString -> Either Text EmailSendResult
+parseEmailSendResult = either (Left . T.pack) Right . eitherDecode
+
+-- | What 'SendEmail' returns: the poll URL plus the status/id already carried
+-- by the 202 body, so a caller need not poll immediately.
+data OperationHandle = OperationHandle {ohUrl :: Text, ohId :: Text, ohStatus :: EmailSendStatus}
+  deriving stock (Eq, Show)
+
+-- | Build an 'OperationHandle' from a 202 response: the @Operation-Location@
+-- header (the absolute poll URL) and the JSON body (id/status).
+sendResultHandle :: ResponseHeaders -> LBS.ByteString -> Either AzureError OperationHandle
+sendResultHandle hdrs body = do
+  loc <-
+    maybe
+      (Left (SerializeError "ACS Email send: response missing Operation-Location header"))
+      Right
+      (lookup "Operation-Location" hdrs)
+  res <- either (Left . SerializeError) Right (parseEmailSendResult body)
+  Right (OperationHandle (decodeUtf8 loc) (esrId res) (esrStatus res))
+
+instance AzureRequest SendEmail where
+  type Rs SendEmail = OperationHandle
+  authFor _ = BearerAuth communicationScope
+  toRequest _ se = do
+    r <-
+      mkRequest
+        "POST"
+        (emailEndpointBase (seEndpoint se) <> "/emails:send")
+        [("api-version", Just emailApiVersion)]
+    pure
+      r
+        { requestBody = RequestBodyLBS (encode se)
+        , requestHeaders =
+            ("Content-Type", "application/json")
+              : maybe [] (\i -> [("Operation-Id", encodeUtf8 i)]) (seOperationId se)
+              <> requestHeaders r
+        }
+  fromResponse _ _ hdrs br = sendResultHandle hdrs <$> readBody br
