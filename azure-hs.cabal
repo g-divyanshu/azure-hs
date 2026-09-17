@@ -20,6 +20,7 @@ library
   import:           shared
   hs-source-dirs:   src
   exposed-modules:
+    Azure.Communication.Email
     Azure.Core
     Azure.Core.Credential
     Azure.Core.Env
@@ -71,6 +72,7 @@ test-suite spec
     BlobSpec
     CoreSpec
     CredentialSpec
+    EmailSpec
     ErrorSpec
     HooksSpec
     IdentitySpec

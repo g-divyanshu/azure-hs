@@ -152,6 +152,39 @@ main = do
 (`errorStatus`, `errorCode`, `errorRequestId`, `errorMessage`) or the prisms in
 `Azure.Core.Error.Lens` (`_HttpStatus`, `_ServiceError`, …).
 
+## Azure.Communication.Email
+
+Queue an email for delivery (async) via `sendEmail_`, then optionally wait for delivery via `awaitEmail`:
+
+```haskell
+import Azure.Core
+import Azure.Identity (discover)
+import Azure.Communication.Email
+import Network.HTTP.Client.TLS (newTlsManager)
+
+main :: IO ()
+main = do
+  mgr <- newTlsManager
+  env <- newEnv mgr (discover mgr)
+  let endpoint = acsEmailEndpoint "https://{resource}.communication.azure.com"
+      content = EmailContent
+        { ecSubject = "Hello from Azure"
+        , ecPlainText = Just "This is a test email."
+        , ecHtml = Just "<p>This is a test email.</p>"
+        }
+      recipients = [mkAddressNamed "recipient@example.com" "Recipient"]
+      baseMsg = newSendEmail endpoint "{sender}@{resource}.communication.azure.com" recipients content
+      msg = baseMsg { seCc = [mkAddress "cc@example.com"] }
+  -- Send returns 202 (queued, not delivered)
+  h <- sendEmail_ env msg
+  putStrLn $ "Email queued: " ++ show (ohId h)
+  -- Optionally poll to terminal status (may block):
+  result <- awaitEmail env h
+  putStrLn $ "Final status: " ++ show (esrStatus result)
+```
+
+`acsEmailEndpoint "https://{resource}.communication.azure.com"` constructs the endpoint. `newSendEmail` creates the request, and fields like `seCc` can be added or changed via record update. `sendEmail_` returns a 202 — the email is *queued*, not delivered. `awaitEmail` polls the operation handle to a terminal status and may block; use it only if you need delivery confirmation.
+
 ## Debugging a 403 AuthenticationFailed
 
 Set the logger to `Trace`. Each request then logs its full string-to-sign on one
